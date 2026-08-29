@@ -115,18 +115,27 @@ button:disabled {
   cursor: not-allowed;
 }
 button.primary {
-  border-color: #2563eb;
-  background: #2563eb;
+  border-color: #3b82f6;
+  background: #3b82f6;
   color: #fff;
-  font-weight: 600;
+  font-weight: 700;
+  font-size: 14px;
+  min-height: 42px;
+  letter-spacing: 0.02em;
 }
 button.primary:hover:not(:disabled) {
+  background: #2563eb;
+  border-color: #2563eb;
+}
+button.primary:active:not(:disabled) {
   background: #1d4ed8;
   border-color: #1d4ed8;
 }
-button.primary:active:not(:disabled) {
-  background: #1e40af;
-  border-color: #1e40af;
+button.primary:disabled {
+  opacity: 1;
+  background: #1e3a8a;
+  border-color: #1e3a8a;
+  color: #93c5fd;
 }
 button.danger {
   border-color: #dc2626;
@@ -263,8 +272,18 @@ button.ghost:hover:not(:disabled) {
   background: var(--accent);
   transition: width 0.15s linear;
 }
-.actions { display: grid; grid-template-columns: 1fr 1fr; }
-.actions .primary, .actions .danger { grid-column: 1 / -1; }
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.actions .primary, .actions .danger {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+.actions .primary {
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.35), 0 8px 18px rgba(37, 99, 235, 0.28);
+}
+.actions .danger {
+  min-height: 42px;
+  font-size: 14px;
+}
 
 .video {
   width: 100%;

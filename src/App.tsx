@@ -345,7 +345,9 @@ export default function App() {
 
           <div className="actions">
             {!running ? (
-              <button className="primary" onClick={onStart} disabled={!files.length}>开始处理</button>
+              <button className="primary" onClick={onStart} disabled={!files.length}>
+                {files.length ? `开始处理（${files.length}）` : "开始处理"}
+              </button>
             ) : (
               <button className="danger" onClick={onCancel}>停止</button>
             )}
