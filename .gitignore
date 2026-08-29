@@ -1,0 +1,51 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Node / Tauri
+node_modules
+dist
+dist-ssr
+*.local
+src-tauri/target/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Large local AI weights (download separately)
+models/*.th
+release/
+
+# Local test media / caches
+test/*.mp4
+test/*.mkv
+test/*.wav
+test/*.png
+test/*.log
+test/bat_log.txt
+__pycache__/
+启动工具-python.bat
+README-python.md
+.gitignore.python.bak
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local bak
+.gitignore.python.bak
