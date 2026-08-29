@@ -37,13 +37,13 @@ const VIDEO_EXTS = [
 ];
 
 const MODEL_OPTIONS = [
-  { label: "标准", value: "htdemucs" },
-  { label: "高质量", value: "htdemucs_ft" },
+  { label: "标准", desc: "更快", value: "htdemucs" },
+  { label: "高质量", desc: "更干净", value: "htdemucs_ft" },
 ];
 
 const TRACK_OPTIONS = [
-  { label: "全部音轨", value: "all" },
-  { label: "仅第一条", value: "first" },
+  { label: "全部音轨", desc: "逐条处理", value: "all" },
+  { label: "仅第一条", desc: "其余保留", value: "first" },
 ];
 
 function isVideoPath(path: string) {
@@ -54,6 +54,12 @@ function isVideoPath(path: string) {
 function basename(path: string) {
   const parts = path.replace(/\\/g, "/").split("/");
   return parts[parts.length - 1] || path;
+}
+
+function extOf(path: string) {
+  const name = basename(path);
+  const i = name.lastIndexOf(".");
+  return i >= 0 ? name.slice(i + 1).toUpperCase() : "FILE";
 }
 
 export default function App() {
@@ -267,9 +273,16 @@ export default function App() {
 
   return (
     <div className="shell">
+      <div className="bg-orb orb-a" />
+      <div className="bg-orb orb-b" />
+
       <header className="topbar">
         <div className="brand">
-          <h1>视频去人声</h1>
+          <div className="mark">NV</div>
+          <div>
+            <div className="kicker">NoVoice</div>
+            <h1>视频去人声</h1>
+          </div>
         </div>
         <div className="top-meta">
           <button className="ghost" onClick={() => setShowAbout(true)}>说明</button>
@@ -283,8 +296,8 @@ export default function App() {
         <section className={`panel files ${dragOver ? "over" : ""}`}>
           <div className="panel-head">
             <div>
-              <strong>文件</strong>
-              <span className="muted">{files.length ? `${files.length}` : "0"}</span>
+              <strong>文件队列</strong>
+              <span className="chip">{files.length}</span>
             </div>
             <div className="btn-row">
               <button onClick={onPick} disabled={running}>添加</button>
@@ -293,13 +306,21 @@ export default function App() {
             </div>
           </div>
           {files.length === 0 ? (
-            <div className="empty">拖视频到这里，或点「添加」</div>
+            <div className="empty">
+              <div className="empty-icon">＋</div>
+              <div className="empty-title">拖拽视频到这里</div>
+              <div className="muted">支持批量，也可点右上角添加</div>
+            </div>
           ) : (
             <ul className="list">
-              {files.map((f) => (
+              {files.map((f, idx) => (
                 <li key={f} className={selected.has(f) ? "on" : ""} onClick={() => toggleSelect(f)} title={f}>
-                  <div className="name">{basename(f)}</div>
-                  <div className="path">{f}</div>
+                  <div className="ext">{extOf(f)}</div>
+                  <div className="meta">
+                    <div className="name">{basename(f)}</div>
+                    <div className="path">{f}</div>
+                  </div>
+                  <div className="idx">#{idx + 1}</div>
                 </li>
               ))}
             </ul>
@@ -308,7 +329,7 @@ export default function App() {
 
         <section className="panel controls">
           <div className="panel-head">
-            <strong>控制</strong>
+            <strong>处理控制</strong>
           </div>
 
           <div className="field">
@@ -316,18 +337,20 @@ export default function App() {
             <div className="seg">
               {MODEL_OPTIONS.map((o) => (
                 <button key={o.value} className={model === o.value ? "on" : ""} disabled={running} onClick={() => setModel(o.value)}>
-                  {o.label}
+                  <b>{o.label}</b>
+                  <span>{o.desc}</span>
                 </button>
               ))}
             </div>
           </div>
 
           <div className="field">
-            <span className="label">音轨</span>
+            <span className="label">音轨策略</span>
             <div className="seg">
               {TRACK_OPTIONS.map((o) => (
                 <button key={o.value} className={tracks === o.value ? "on" : ""} disabled={running} onClick={() => setTracks(o.value)}>
-                  {o.label}
+                  <b>{o.label}</b>
+                  <span>{o.desc}</span>
                 </button>
               ))}
             </div>
@@ -340,7 +363,7 @@ export default function App() {
 
           <div className="status-box">
             <div>
-              <div className="label">状态</div>
+              <div className="label">当前状态</div>
               <div className="status">{status}</div>
             </div>
             <div className="pct">{pct}%</div>
@@ -361,7 +384,7 @@ export default function App() {
         <section className="panel player">
           <div className="panel-head">
             <div>
-              <strong>播放器</strong>
+              <strong>预览播放器</strong>
               <span className="muted">{playerPath ? basename(playerPath) : "未载入"}</span>
             </div>
             <div className="btn-row">
@@ -372,15 +395,18 @@ export default function App() {
           {playerPath && playerSrc ? (
             <video key={playerPath} ref={videoRef} className="video" src={playerSrc} controls playsInline preload="metadata" />
           ) : (
-            <div className="empty short">完成后会显示在这里</div>
+            <div className="empty short">
+              <div className="empty-title">等待处理结果</div>
+              <div className="muted">完成后会自动出现在这里</div>
+            </div>
           )}
         </section>
 
         <section className="panel logs">
           <div className="panel-head">
             <div>
-              <strong>日志</strong>
-              <span className="muted">{logs.length}</span>
+              <strong>运行日志</strong>
+              <span className="chip">{logs.length}</span>
             </div>
             <button onClick={() => setLogs([])} disabled={!logs.length}>清空</button>
           </div>
@@ -389,7 +415,10 @@ export default function App() {
               <div className="muted pad">暂无日志</div>
             ) : (
               logs.map((l, i) => (
-                <div key={`${i}-${l.message}`} className={`log-line ${l.level}`}>{l.message}</div>
+                <div key={`${i}-${l.message}`} className={`log-line ${l.level}`}>
+                  <span className="dot" />
+                  <span>{l.message}</span>
+                </div>
               ))
             )}
           </div>
@@ -421,7 +450,7 @@ export default function App() {
                   try {
                     const { openUrl } = await import("@tauri-apps/plugin-opener");
                     await openUrl("https://github.com/cat7street/NoVoice");
-                  } catch (e) {
+                  } catch {
                     try {
                       await openPath("https://github.com/cat7street/NoVoice");
                     } catch (e2) {
