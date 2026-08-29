@@ -15,9 +15,9 @@
       {
         "title": "视频去人声工具 · 画面无损",
         "width": 1180,
-        "height": 780,
-        "minWidth": 1000,
-        "minHeight": 680,
+        "height": 800,
+        "minWidth": 1040,
+        "minHeight": 720,
         "resizable": true
       }
     ],
