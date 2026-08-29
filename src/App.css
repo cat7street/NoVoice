@@ -161,6 +161,22 @@ button.ghost:hover:not(:disabled) {
   border-color: #374151;
   color: var(--text);
 }
+button.about-btn {
+  border-color: #60a5fa;
+  background: #1e3a8a;
+  color: #dbeafe;
+  font-weight: 650;
+  min-width: 64px;
+}
+button.about-btn:hover:not(:disabled) {
+  border-color: #93c5fd;
+  background: #1d4ed8;
+  color: #eff6ff;
+}
+button.about-btn:active:not(:disabled) {
+  background: #1e40af;
+  border-color: #60a5fa;
+}
 
 .files.over {
   border-color: #60a5fa;

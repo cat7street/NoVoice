@@ -279,7 +279,7 @@ export default function App() {
       <header className="topbar">
         <h1>视频去人声</h1>
         <div className="top-meta">
-          <button className="ghost" onClick={() => setShowAbout(true)}>说明</button>
+          <button className="about-btn" onClick={() => setShowAbout(true)}>说明</button>
           <span className={`pill ${envReady ? "good" : env ? "bad" : ""}`}>
             {env ? (envReady ? "环境正常" : "环境缺件") : "检查中"}
           </span>
