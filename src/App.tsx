@@ -72,6 +72,7 @@ export default function App() {
   const [autoPlay, setAutoPlay] = useState(true);
   const [showAbout, setShowAbout] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const ABOUT_FLAG = "novoice.about.seen";
 
   const pushLog = useCallback((level: LogItem["level"], message: string) => {
     setLogs((prev) => [...prev, { level, message }].slice(-300));
@@ -102,6 +103,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    try {
+      if (localStorage.getItem(ABOUT_FLAG) !== "1") {
+        setShowAbout(true);
+      }
+    } catch {
+      setShowAbout(true);
+    }
+
     invoke<EnvInfo>("env_check", { pythonPath: null, modelRepo: null })
       .then(setEnv)
       .catch((e) => pushLog("err", String(e)));
@@ -395,11 +404,24 @@ export default function App() {
       </div>
 
       {showAbout && (
-        <div className="modal-mask" onClick={() => setShowAbout(false)}>
+        <div
+          className="modal-mask"
+          onClick={() => {
+            try { localStorage.setItem(ABOUT_FLAG, "1"); } catch {}
+            setShowAbout(false);
+          }}
+        >
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-head">
               <h2>关于 NoVoice</h2>
-              <button onClick={() => setShowAbout(false)}>关闭</button>
+              <button
+                onClick={() => {
+                  try { localStorage.setItem(ABOUT_FLAG, "1"); } catch {}
+                  setShowAbout(false);
+                }}
+              >
+                关闭
+              </button>
             </div>
             <div className="modal-body">
               <p>视频去人声工具：画面零重编码，仅处理音轨，支持拖放批量处理与内置播放。</p>
@@ -430,7 +452,14 @@ export default function App() {
               >
                 打开开源地址
               </button>
-              <button onClick={() => setShowAbout(false)}>知道了</button>
+              <button
+                onClick={() => {
+                  try { localStorage.setItem(ABOUT_FLAG, "1"); } catch {}
+                  setShowAbout(false);
+                }}
+              >
+                知道了
+              </button>
             </div>
           </div>
         </div>
