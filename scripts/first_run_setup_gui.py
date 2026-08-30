@@ -22,8 +22,16 @@ EXE = ROOT / "NoVoice.exe"
 MARKER = ROOT / ".env_ready"
 MODELS = ROOT / "models"
 CACHE = ROOT / ".cache"
-ICON = ROOT / "NoVoice.exe"
-MODEL_BASE = "https://hf-mirror.com/Politrees/UVR_resources/resolve/main/models/Demucs/Demucs_v4"
+ICON_CANDIDATES = [
+    ROOT / "app.ico",
+    ROOT / "icon.ico",
+    ROOT / "NoVoice.exe",
+]
+MODEL_MIRRORS = [
+    "https://hf-mirror.com/Politrees/UVR_resources/resolve/main/models/Demucs/Demucs_v4/{name}",
+    "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/Demucs/Demucs_v4/{name}",
+    "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/{name}",
+]
 MODEL_FILES = [
     "htdemucs.yaml",
     "htdemucs_ft.yaml",
@@ -60,10 +68,13 @@ class SetupApp:
         self.root.geometry("560x320")
         self.root.resizable(False, False)
         self.root.configure(bg=BG)
-        try:
-            self.root.iconbitmap(default=str(ICON))
-        except Exception:
-            pass
+        for icon in ICON_CANDIDATES:
+            if icon.exists():
+                try:
+                    self.root.iconbitmap(default=str(icon))
+                    break
+                except Exception:
+                    continue
 
         self.step = tk.StringVar(value="准备开始")
         self.detail = tk.StringVar(value="首次启动会配置运行环境，只需这一次。")
@@ -71,7 +82,6 @@ class SetupApp:
         self.show_log = False
         self._progress = 0.0
         self._shown = 0.0
-        self._shimmer = 0.0
         self._pulse = 0.0
         self._active_step = -1
         self._busy_since = time.time()
@@ -146,9 +156,6 @@ class SetupApp:
         fill = int(w * max(0.0, min(1.0, self._shown / 100.0)))
         if fill > 1:
             self._round_rect(0, 0, fill, h, r, ACCENT)
-            if fill > 24:
-                shine = int((self._shimmer % 1.0) * (fill + 36) - 18)
-                self.canvas.create_rectangle(max(2, shine), 2, min(fill - 2, shine + 26), h - 2, fill="#93c5fd", outline="")
         self.percent.set(f"{int(self._shown)}%")
 
     def _tick(self):
@@ -165,8 +172,7 @@ class SetupApp:
         else:
             shown += delta * 0.16
         self._shown = max(0.0, min(99.4 if self._progress < 100 else 100.0, shown))
-        self._shimmer = (self._shimmer + 0.02) % 1.0
-        self._pulse = (self._pulse + 0.05) % (math.pi * 2)
+        self._pulse = (self._pulse + 0.04) % (math.pi * 2)
         if self._active_step >= 0:
             self._paint_steps()
         self._draw_bar()
@@ -273,20 +279,21 @@ class SetupApp:
         def elapsed_ratio(got):
             return min(0.8, math.log10(max(got, 1)) / 10)
 
-        req = urllib.request.Request(url, headers={"User-Agent": "NoVoice-setup"})
-        try:
-            urllib.request.urlretrieve(url, tmp, hook)
-        except Exception:
-            with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as f:
-                total = int(resp.headers.get("Content-Length") or 0)
-                got = 0
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 NoVoice-setup"})
+        opener = urllib.request.build_opener()
+        with opener.open(req, timeout=60) as resp:
+            if getattr(resp, "status", 200) >= 400:
+                raise RuntimeError(f"HTTP {resp.status}")
+            total = int(resp.headers.get("Content-Length") or 0)
+            got = 0
+            with open(tmp, "wb") as f:
                 while True:
                     chunk = resp.read(1024 * 256)
                     if not chunk:
                         break
                     f.write(chunk)
                     got += len(chunk)
-                    hook(got, 1, total)
+                    hook(max(got, 1), 1, total)
         if not tmp.exists() or tmp.stat().st_size < 10:
             raise RuntimeError(f"下载失败: {name}")
         tmp.replace(dest)
@@ -414,7 +421,21 @@ class SetupApp:
             base = 60 + 26 * i / total
             span = 26 / total
             self.set_progress(base, detail=f"下载模型 {name}  ({i + 1}/{total})", crawl=True)
-            self._download(f"{MODEL_BASE}/{name}", MODELS / name, base, span, label=name)
+            last_err = None
+            urls = [tpl.format(name=name) for tpl in MODEL_MIRRORS]
+            if not name.endswith(".th"):
+                urls = urls[:2]
+            for url in urls:
+                try:
+                    self.append(f"GET {url}")
+                    self._download(url, MODELS / name, base, span, label=name)
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    self.append(f"{name} 源失败，换源: {e}")
+            if last_err:
+                raise last_err
         self.set_progress(86)
 
     def ensure_ffmpeg(self):
