@@ -6,13 +6,17 @@
 去掉视频里的人声（对白 / 演唱），**画面、字幕、章节、元数据不受影响**。  
 桌面端基于 **Tauri 2 + React + Rust**，分离引擎复用 Demucs。
 
-## 使用（推荐）
+## 给别人用（推荐）
 
-1. 安装 [FFmpeg](https://ffmpeg.org/) 并加入 PATH  
-2. 双击 Release 包里的 `NoVoice.exe`（无黑色终端窗口）  
-3. 拖入视频 → 开始处理 → 内置播放器查看结果
+发小安装包 `release\NoVoice-Setup.exe`（约 **2.8MB**，微信能发）。
 
-> Release 包会附带运行所需的 Python/Demucs 环境与模型目录说明。开发调试仍可用 `启动工具.bat`。
+对方：
+1. 双击安装到任意目录（默认 `%LOCALAPPDATA%\NoVoice`）
+2. 桌面快捷方式指向 `bootstrap-and-run.bat`
+3. **首次运行**会自动：建 venv → 装 PyTorch/Demucs → 下模型 → 启动 GUI
+4. 之后双击快捷方式秒开
+
+也可用：`配置环境并启动.bat`（开发目录首次配环境）。
 
 ## 开发
 
@@ -21,25 +25,23 @@ pnpm install
 pnpm tauri dev
 ```
 
-构建 Release：
+构建瘦 Release：
 
 ```bash
-pnpm tauri build
+powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
 ```
 
-产物通常在：
+构建小安装包：
 
-- `src-tauri/target/release/novoice-tauri.exe`
-- `src-tauri/target/release/bundle/`
+```bash
+# 需先有 release\NoVoice\NoVoice.exe
+& "$env:LOCALAPPDATA\tauri\NSIS\makensis.exe" scripts\NoVoice-Setup.nsi
+```
 
-## 功能
+## 注意
 
-- 拖放 / 批量处理
-- 标准 / 高质量模型
-- 全部音轨或仅第一条
-- 后台处理，界面不卡死
-- 内置播放器，完成后可直接播放
-- 打开输出目录
+- 完整 5GB+ 包不要用 NSIS（会 mmapping 失败）；完整分发用 7z 分卷或网盘。
+- `models/*.th` 不入库；首次由 bootstrap 自动下载。
 
 ## License
 

@@ -11,6 +11,9 @@ use std::sync::Arc;
 use thiserror::Error;
 use which::which;
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 pub const SAMPLE_RATE: u32 = 44100;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,14 +64,28 @@ pub enum PipelineError {
 pub type ProgressCb = Box<dyn FnMut(ProgressEvent) -> bool + Send>;
 
 fn find_tool(name: &str) -> Result<PathBuf, PipelineError> {
+    let root = project_root();
+    let local = root.join("runtime").join("ffmpeg").join(format!("{name}.exe"));
+    if local.exists() {
+        return Ok(local);
+    }
+    let local2 = root.join("ffmpeg").join(format!("{name}.exe"));
+    if local2.exists() {
+        return Ok(local2);
+    }
     which(name).map_err(|_| {
         PipelineError::Message(format!(
-            "未找到 {name}。请先安装 FFmpeg 并加入 PATH，例如: winget install Gyan.FFmpeg"
+            "未找到 {name}。完整包应包含 runtime/ffmpeg；也可自行安装 FFmpeg 并加入 PATH。"
         ))
     })
 }
 
 fn run_checked(cmd: &mut Command) -> Result<(), PipelineError> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     let output = cmd.output()?;
     if output.status.success() {
         return Ok(());
@@ -82,21 +99,25 @@ fn run_checked(cmd: &mut Command) -> Result<(), PipelineError> {
 }
 
 fn probe(ffprobe: &Path, input: &Path) -> Result<Value, PipelineError> {
-    let output = Command::new(ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-print_format",
-            "json",
-            "-show_format",
-            "-show_streams",
-        ])
-        .arg(input)
-        .output()?;
+    let mut cmd = Command::new(ffprobe);
+    cmd.args([
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+    ])
+    .arg(input);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd.output()?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(PipelineError::Message(format!("ffprobe 失败:
-{err}")));
+        return Err(PipelineError::Message(format!("ffprobe 失败:\n{err}")));
     }
     Ok(serde_json::from_slice(&output.stdout)?)
 }
@@ -121,14 +142,27 @@ fn has_nvidia() -> bool {
 }
 
 fn project_root() -> PathBuf {
-    // src-tauri 的可执行文件在 target/.../；发布后也尽量回退到当前目录。
+    // 优先：exe 同目录（完整包）；其次向上找开发目录。
     if let Ok(exe) = std::env::current_exe() {
-        let mut p = exe;
-        for _ in 0..5 {
-            if let Some(parent) = p.parent() {
-                p = parent.to_path_buf();
-                if p.join("models").is_dir() || p.join(".venv").is_dir() || p.join("package.json").is_file() {
-                    return p;
+        if let Some(dir) = exe.parent() {
+            if dir.join("runtime").is_dir()
+                || dir.join("models").is_dir()
+                || dir.join(".venv").is_dir()
+                || dir.join("package.json").is_file()
+            {
+                return dir.to_path_buf();
+            }
+            let mut p = dir.to_path_buf();
+            for _ in 0..6 {
+                if let Some(parent) = p.parent() {
+                    p = parent.to_path_buf();
+                    if p.join("runtime").is_dir()
+                        || p.join("models").is_dir()
+                        || p.join(".venv").is_dir()
+                        || p.join("package.json").is_file()
+                    {
+                        return p;
+                    }
                 }
             }
         }
@@ -139,6 +173,10 @@ fn project_root() -> PathBuf {
 fn default_python() -> PathBuf {
     let root = project_root();
     let candidates = [
+        root.join("runtime").join("python").join("python.exe"),
+        root.join("runtime").join("python").join("pythonw.exe"),
+        root.join("runtime").join("python").join("Scripts").join("python.exe"),
+        root.join("runtime").join("python").join("Scripts").join("pythonw.exe"),
         root.join(".venv").join("Scripts").join("python.exe"),
         root.join(".venv").join("Scripts").join("pythonw.exe"),
         root.join("venv").join("Scripts").join("python.exe"),
@@ -209,11 +247,16 @@ fn run_demucs(
         }
         args.push(wav.display().to_string());
 
-        let mut child = Command::new(python)
-            .args(&args)
+        let mut cmd = Command::new(python);
+        cmd.args(&args)
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn()?;
         let mut cancelled = false;
         let mut tail = String::new();
         if let Some(stderr) = child.stderr.take() {
