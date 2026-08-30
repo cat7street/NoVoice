@@ -60,7 +60,12 @@ class SetupApp:
         self.percent = tk.StringVar(value="0%")
         self.show_log = False
         self._progress = 0.0
+        self._shown = 0.0
+        self._shimmer = 0.0
+        self._pulse = 0.0
+        self._active_step = -1
         self._log_lines = []
+        self._animating = True
 
         outer = tk.Frame(self.root, bg=BG)
         outer.pack(fill="both", expand=True, padx=18, pady=16)
@@ -100,7 +105,7 @@ class SetupApp:
         tk.Label(inner, textvariable=self.detail, fg=MUTED, bg=PANEL, font=("Microsoft YaHei UI", 9),
                  wraplength=500, justify="left").pack(anchor="w", pady=(4, 10))
 
-        self.canvas = tk.Canvas(inner, height=8, bg=PANEL, highlightthickness=0, bd=0)
+        self.canvas = tk.Canvas(inner, height=10, bg=PANEL, highlightthickness=0, bd=0)
         self.canvas.pack(fill="x")
         self.canvas.bind("<Configure>", lambda _e: self._draw_bar())
 
@@ -120,16 +125,54 @@ class SetupApp:
         )
         self.log.configure(state="disabled")
 
+        self.root.after(16, self._tick)
         self.root.after(180, self.start)
 
     def _draw_bar(self):
         self.canvas.delete("all")
         w = max(self.canvas.winfo_width(), 1)
-        h = 8
-        self.canvas.create_rectangle(0, 0, w, h, fill="#0f172a", outline="")
-        fill = int(w * max(0.0, min(1.0, self._progress / 100.0)))
-        if fill > 0:
-            self.canvas.create_rectangle(0, 0, fill, h, fill=ACCENT, outline="")
+        h = 10
+        r = 5
+        self.canvas.create_rectangle(0, 0, w, h, fill=PANEL, outline="")
+        self._round_rect(0, 0, w, h, r, "#0f172a")
+        fill = int(w * max(0.0, min(1.0, self._shown / 100.0)))
+        if fill > 1:
+            self._round_rect(0, 0, fill, h, r, ACCENT)
+            if fill > 18:
+                shine = int((self._shimmer % 1.0) * (fill + 40) - 20)
+                self.canvas.create_rectangle(max(2, shine), 2, min(fill - 2, shine + 28), h - 2, fill="#93c5fd", outline="")
+        self.percent.set(f"{int(self._shown)}%")
+
+    def _round_rect(self, x1, y1, x2, y2, r, color):
+        r = min(r, (x2 - x1) / 2, (y2 - y1) / 2)
+        if x2 - x1 <= 0 or y2 - y1 <= 0:
+            return
+        self.canvas.create_arc(x1, y1, x1 + 2 * r, y1 + 2 * r, start=90, extent=90, fill=color, outline=color)
+        self.canvas.create_arc(x2 - 2 * r, y1, x2, y1 + 2 * r, start=0, extent=90, fill=color, outline=color)
+        self.canvas.create_arc(x1, y2 - 2 * r, x1 + 2 * r, y2, start=180, extent=90, fill=color, outline=color)
+        self.canvas.create_arc(x2 - 2 * r, y2 - 2 * r, x2, y2, start=270, extent=90, fill=color, outline=color)
+        self.canvas.create_rectangle(x1 + r, y1, x2 - r, y2, fill=color, outline=color)
+        self.canvas.create_rectangle(x1, y1 + r, x2, y2 - r, fill=color, outline=color)
+
+    def _tick(self):
+        if not self._animating:
+            return
+        target = self._progress
+        shown = self._shown
+        delta = target - shown
+        if abs(delta) < 0.08:
+            shown = target
+        else:
+            shown += delta * 0.12
+            if abs(delta) > 0.4:
+                shown += 0.08 if delta > 0 else -0.08
+        self._shown = max(0.0, min(100.0, shown))
+        self._shimmer = (self._shimmer + 0.018) % 1.0
+        self._pulse = (self._pulse + 0.045) % 6.283185307179586
+        if self._active_step >= 0:
+            self._paint_steps()
+        self._draw_bar()
+        self.root.after(16, self._tick)
 
     def _toggle_log(self):
         self.show_log = not self.show_log
@@ -142,20 +185,24 @@ class SetupApp:
             self.log.pack_forget()
             self.root.geometry("560x320")
 
-    def _set_step(self, idx):
+    def _paint_steps(self):
+        idx = self._active_step
+        pulse = 0.5 + 0.5 * __import__("math").sin(self._pulse)
         for i, lab in enumerate(self.step_labels):
             if i < idx:
                 lab.configure(fg="#86efac", bg="#14532d")
             elif i == idx:
-                lab.configure(fg="#dbeafe", bg="#1e3a8a")
+                lab.configure(fg="#eff6ff", bg="#1d4ed8" if pulse > 0.35 else "#1e40af")
             else:
                 lab.configure(fg=MUTED, bg=PANEL)
+
+    def _set_step(self, idx):
+        self._active_step = idx
+        self._paint_steps()
 
     def set_progress(self, value, status=None, detail=None, step=None):
         def _():
             self._progress = max(0.0, min(100.0, float(value)))
-            self.percent.set(f"{int(self._progress)}%")
-            self._draw_bar()
             if status:
                 self.step.set(status)
             if detail:
@@ -374,7 +421,7 @@ class SetupApp:
             self.set_progress(100, "配置完成", "即将启动 NoVoice…", step=4)
             if EXE.exists():
                 subprocess.Popen([str(EXE)], cwd=str(ROOT))
-                self.root.after(500, self.root.destroy)
+                self.root.after(700, self.root.destroy)
             else:
                 self.root.after(0, lambda: messagebox.showerror("错误", "未找到 NoVoice.exe"))
         except Exception as e:
