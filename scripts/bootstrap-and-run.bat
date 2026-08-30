@@ -64,8 +64,9 @@ if errorlevel 1 (
   )
 )
 
+echo ready> ".env_ready"
+
 if exist "NoVoice.exe" (
-  echo Starting GUI...
   start "" "NoVoice.exe"
   exit /b 0
 )
