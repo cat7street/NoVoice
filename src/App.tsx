@@ -436,6 +436,19 @@ export default function App() {
             </div>
             <div className="modal-actions">
               <button
+                className="danger-ghost"
+                onClick={async () => {
+                  try {
+                    await invoke("launch_uninstaller");
+                    try { await getCurrentWindow().close(); } catch {}
+                  } catch (e) {
+                    pushLog("err", String(e));
+                  }
+                }}
+              >
+                卸载
+              </button>
+              <button
                 className="primary"
                 onClick={async () => {
                   try {

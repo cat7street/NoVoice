@@ -26,6 +26,26 @@ fn env_check(python_path: Option<String>, model_repo: Option<String>) -> serde_j
 }
 
 #[tauri::command]
+fn launch_uninstaller() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe.parent().ok_or_else(|| "找不到程序目录".to_string())?;
+    let uninst = dir.join("Uninstall.exe");
+    if !uninst.exists() {
+        return Err("当前目录没有卸载程序。可到开始菜单或「应用和功能」里卸载。".into());
+    }
+    let mut cmd = std::process::Command::new(&uninst);
+    cmd.current_dir(dir);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    cmd.spawn()
+        .map_err(|e| format!("无法启动卸载程序: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn cancel_job(state: State<'_, AppState>) -> bool {
     if let Ok(guard) = state.cancel.lock() {
         if let Some(flag) = guard.as_ref() {
@@ -162,7 +182,7 @@ pub fn run() {
         .manage(AppState {
             cancel: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![env_check, process_videos, cancel_job])
+        .invoke_handler(tauri::generate_handler![env_check, process_videos, cancel_job, launch_uninstaller])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
