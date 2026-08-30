@@ -24,21 +24,42 @@ struct BatchResult {
 fn env_check(python_path: Option<String>, model_repo: Option<String>) -> serde_json::Value {
     check_environment(python_path, model_repo)
 }
+fn find_uninstaller() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("Uninstall.exe"));
+        }
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local).join("NoVoice").join("Uninstall.exe"));
+    }
+    if let Ok(prog) = std::env::var("ProgramFiles") {
+        candidates.push(PathBuf::from(prog).join("NoVoice").join("Uninstall.exe"));
+    }
+    for p in candidates {
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
 
 #[tauri::command]
 fn launch_uninstaller() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = exe.parent().ok_or_else(|| "找不到程序目录".to_string())?;
-    let uninst = dir.join("Uninstall.exe");
-    if !uninst.exists() {
-        return Err("当前目录没有卸载程序。可到开始菜单或「应用和功能」里卸载。".into());
-    }
+    let uninst = find_uninstaller().ok_or_else(|| {
+        "没有找到卸载程序。请重装完整安装包，或到开始菜单 / 「应用和功能」里卸载。".to_string()
+    })?;
+    let dir = uninst
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         std::process::Command::new("cmd")
             .args(["/C", "start", "", &uninst.display().to_string()])
-            .current_dir(dir)
+            .current_dir(&dir)
             .creation_flags(0x08000000)
             .spawn()
             .map_err(|e| format!("无法启动卸载程序: {e}"))?;
@@ -47,11 +68,11 @@ fn launch_uninstaller() -> Result<(), String> {
     #[cfg(not(windows))]
     {
         std::process::Command::new(&uninst)
-            .current_dir(dir)
+            .current_dir(&dir)
             .spawn()
             .map_err(|e| format!("无法启动卸载程序: {e}"))?;
+        Ok(())
     }
-    Ok(())
 }
 
 #[tauri::command]

@@ -442,7 +442,7 @@ export default function App() {
                     await invoke("launch_uninstaller");
                     window.setTimeout(() => {
                       getCurrentWindow().close().catch(() => {});
-                    }, 250);
+                    }, 400);
                   } catch (e) {
                     const msg = String(e);
                     pushLog("err", msg);
