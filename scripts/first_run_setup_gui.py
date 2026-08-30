@@ -211,26 +211,56 @@ class SetupApp:
         if m:
             self.set_progress(base + 30 * int(m.group(1)) / 100.0)
 
+    def _emit_line(self, line, progress_base=None):
+        line = (line or "").strip()
+        if not line:
+            return
+        self.append(line)
+        if progress_base is not None:
+            self._parse_pip_progress(line, progress_base)
+
     def run_cmd(self, args, env=None, progress_base=None):
-        self.append("> " + " ".join(map(str, args)))
+        cmd = list(args)
+        merged = dict(os.environ)
+        if env:
+            merged.update(env)
+        merged["PYTHONUNBUFFERED"] = "1"
+        merged["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+        if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "pip":
+            if "--progress-bar" not in cmd:
+                cmd.extend(["--progress-bar", "on"])
+        self.append("> " + " ".join(map(str, cmd)))
         p = subprocess.Popen(
-            args,
+            cmd,
             cwd=str(ROOT),
-            env=env,
+            env=merged,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            bufsize=0,
         )
         assert p.stdout is not None
-        for raw in p.stdout:
-            line = raw.rstrip()
-            if not line:
-                continue
-            self.append(line)
-            if progress_base is not None:
-                self._parse_pip_progress(line, progress_base)
+        buf = b""
+        while True:
+            chunk = p.stdout.read(256)
+            if not chunk:
+                break
+            buf += chunk
+            while True:
+                n = buf.find(b"\n")
+                r = buf.find(b"\r")
+                if n < 0 and r < 0:
+                    break
+                if n < 0:
+                    cut = r
+                elif r < 0:
+                    cut = n
+                else:
+                    cut = min(n, r)
+                piece = buf[:cut].decode("utf-8", "replace")
+                buf = buf[cut + 1 :]
+                self._emit_line(piece, progress_base)
+        if buf:
+            self._emit_line(buf.decode("utf-8", "replace"), progress_base)
         code = p.wait()
         if code != 0:
             raise RuntimeError(f"命令失败 ({code})")
