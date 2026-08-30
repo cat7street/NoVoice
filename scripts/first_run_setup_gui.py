@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 import os
+import re
 import sys
 import subprocess
 import threading
-import queue
+import urllib.request
 from pathlib import Path
 
 try:
     import tkinter as tk
-    from tkinter import ttk, messagebox
+    from tkinter import messagebox
 except Exception as e:
     print("tkinter missing:", e)
     sys.exit(1)
@@ -18,6 +19,7 @@ VPY = ROOT / ".venv" / "Scripts" / "python.exe"
 EXE = ROOT / "NoVoice.exe"
 MARKER = ROOT / ".env_ready"
 MODELS = ROOT / "models"
+ICON = ROOT / "NoVoice.exe"
 MODEL_BASE = "https://hf-mirror.com/Politrees/UVR_resources/resolve/main/models/Demucs/Demucs_v4"
 MODEL_FILES = [
     "htdemucs.yaml",
@@ -29,62 +31,147 @@ MODEL_FILES = [
     "f7e0c4bc-ba3fe64a.th",
 ]
 
+BG = "#111827"
+PANEL = "#1f2937"
+TEXT = "#e5e7eb"
+MUTED = "#9ca3af"
+LINE = "#374151"
+ACCENT = "#3b82f6"
+OK = "#22c55e"
+PIP_SIZE = re.compile(r"(\d+(?:\.\d+)?)/(\d+(?:\.\d+)?)\s*(kB|MB|GB|KiB|MiB|GiB)", re.I)
+PIP_PCT = re.compile(r"(\d{1,3})%")
+
 
 class SetupApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("NoVoice 首次配置")
-        self.root.geometry("520x280")
+        self.root.title("NoVoice")
+        self.root.geometry("560x320")
         self.root.resizable(False, False)
-        self.root.configure(bg="#111827")
+        self.root.configure(bg=BG)
+        self.root.minsize(560, 320)
         try:
-            self.root.iconbitmap(default=str(ROOT / "NoVoice.exe"))
+            self.root.iconbitmap(default=str(ICON))
         except Exception:
             pass
 
-        self.status = tk.StringVar(value="准备开始…")
-        self.detail = tk.StringVar(value="首次启动需要安装 Python 依赖并下载模型，请稍候。")
-        self.progress = tk.DoubleVar(value=0)
+        self.step = tk.StringVar(value="准备开始")
+        self.detail = tk.StringVar(value="首次启动会配置运行环境，只需这一次。")
+        self.percent = tk.StringVar(value="0%")
+        self.show_log = False
+        self._progress = 0.0
+        self._log_lines = []
 
-        title = tk.Label(self.root, text="NoVoice 环境配置", fg="#f9fafb", bg="#111827",
-                         font=("Microsoft YaHei UI", 14, "bold"))
-        title.pack(anchor="w", padx=20, pady=(18, 6))
+        outer = tk.Frame(self.root, bg=BG)
+        outer.pack(fill="both", expand=True, padx=18, pady=16)
 
-        tk.Label(self.root, textvariable=self.status, fg="#93c5fd", bg="#111827",
-                 font=("Microsoft YaHei UI", 11)).pack(anchor="w", padx=20)
-        tk.Label(self.root, textvariable=self.detail, fg="#9ca3af", bg="#111827",
-                 font=("Microsoft YaHei UI", 9), wraplength=480, justify="left").pack(anchor="w", padx=20, pady=(4, 12))
+        head = tk.Frame(outer, bg=BG)
+        head.pack(fill="x")
+        tk.Label(head, text="NoVoice", fg=TEXT, bg=BG, font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w")
+        tk.Label(head, text="正在准备运行环境", fg=MUTED, bg=BG, font=("Microsoft YaHei UI", 10)).pack(anchor="w", pady=(2, 12))
 
-        style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
-        style.configure("Blue.Horizontal.TProgressbar", troughcolor="#1f2937", background="#3b82f6", thickness=16)
-        self.bar = ttk.Progressbar(self.root, style="Blue.Horizontal.TProgressbar",
-                                   maximum=100, variable=self.progress, mode="determinate", length=480)
-        self.bar.pack(padx=20, pady=8)
+        self.steps_frame = tk.Frame(outer, bg=BG)
+        self.steps_frame.pack(fill="x", pady=(0, 14))
+        self.step_labels = []
+        names = ["创建环境", "安装依赖", "下载模型", "检查工具"]
+        for i, name in enumerate(names):
+            lab = tk.Label(
+                self.steps_frame,
+                text=f"{i + 1}  {name}",
+                fg=MUTED,
+                bg=PANEL,
+                font=("Microsoft YaHei UI", 9),
+                padx=10,
+                pady=6,
+            )
+            lab.pack(side="left", padx=(0 if i == 0 else 6, 0))
+            self.step_labels.append(lab)
 
-        self.log = tk.Text(self.root, height=6, bg="#0b1220", fg="#d1d5db", insertbackground="#d1d5db",
-                           relief="flat", font=("Consolas", 9))
-        self.log.pack(fill="both", expand=True, padx=20, pady=(4, 16))
+        card = tk.Frame(outer, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
+        card.pack(fill="x")
+        inner = tk.Frame(card, bg=PANEL)
+        inner.pack(fill="x", padx=14, pady=12)
+
+        row = tk.Frame(inner, bg=PANEL)
+        row.pack(fill="x")
+        tk.Label(row, textvariable=self.step, fg=TEXT, bg=PANEL, font=("Microsoft YaHei UI", 11)).pack(side="left")
+        tk.Label(row, textvariable=self.percent, fg=ACCENT, bg=PANEL, font=("Microsoft YaHei UI", 11)).pack(side="right")
+
+        tk.Label(inner, textvariable=self.detail, fg=MUTED, bg=PANEL, font=("Microsoft YaHei UI", 9),
+                 wraplength=500, justify="left").pack(anchor="w", pady=(4, 10))
+
+        self.canvas = tk.Canvas(inner, height=8, bg=PANEL, highlightthickness=0, bd=0)
+        self.canvas.pack(fill="x")
+        self.canvas.bind("<Configure>", lambda _e: self._draw_bar())
+
+        self.toggle = tk.Label(outer, text="显示详情", fg=MUTED, bg=BG, font=("Microsoft YaHei UI", 9), cursor="hand2")
+        self.toggle.pack(anchor="w", pady=(10, 0))
+        self.toggle.bind("<Button-1>", lambda _e: self._toggle_log())
+
+        self.log = tk.Text(
+            outer,
+            height=7,
+            bg="#0b1220",
+            fg="#9ca3af",
+            relief="flat",
+            bd=0,
+            font=("Consolas", 8),
+            wrap="word",
+        )
         self.log.configure(state="disabled")
 
-        self.root.after(200, self.start)
+        self.root.after(180, self.start)
 
-    def set_progress(self, value, status=None, detail=None):
+    def _draw_bar(self):
+        self.canvas.delete("all")
+        w = max(self.canvas.winfo_width(), 1)
+        h = 8
+        self.canvas.create_rectangle(0, 0, w, h, fill="#0f172a", outline="")
+        fill = int(w * max(0.0, min(1.0, self._progress / 100.0)))
+        if fill > 0:
+            self.canvas.create_rectangle(0, 0, fill, h, fill=ACCENT, outline="")
+
+    def _toggle_log(self):
+        self.show_log = not self.show_log
+        if self.show_log:
+            self.toggle.configure(text="隐藏详情")
+            self.log.pack(fill="both", expand=True, pady=(8, 0))
+            self.root.geometry("560x460")
+        else:
+            self.toggle.configure(text="显示详情")
+            self.log.pack_forget()
+            self.root.geometry("560x320")
+
+    def _set_step(self, idx):
+        for i, lab in enumerate(self.step_labels):
+            if i < idx:
+                lab.configure(fg="#86efac", bg="#14532d")
+            elif i == idx:
+                lab.configure(fg="#dbeafe", bg="#1e3a8a")
+            else:
+                lab.configure(fg=MUTED, bg=PANEL)
+
+    def set_progress(self, value, status=None, detail=None, step=None):
         def _():
-            self.progress.set(max(0, min(100, value)))
+            self._progress = max(0.0, min(100.0, float(value)))
+            self.percent.set(f"{int(self._progress)}%")
+            self._draw_bar()
             if status:
-                self.status.set(status)
+                self.step.set(status)
             if detail:
                 self.detail.set(detail)
+            if step is not None:
+                self._set_step(step)
         self.root.after(0, _)
 
     def append(self, text):
+        line = (text or "").strip()
+        if not line:
+            return
         def _():
+            self._log_lines.append(line)
             self.log.configure(state="normal")
-            self.log.insert("end", text + "\n")
+            self.log.insert("end", line + "\n")
             self.log.see("end")
             self.log.configure(state="disabled")
         self.root.after(0, _)
@@ -103,78 +190,140 @@ class SetupApp:
                 pass
         return ["python"]
 
-    def run_cmd(self, args, env=None):
+    def _human(self, n):
+        n = float(n)
+        for unit in ("B", "KB", "MB", "GB"):
+            if n < 1024 or unit == "GB":
+                return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
+            n /= 1024
+        return f"{n:.1f} GB"
+
+    def _parse_pip_progress(self, line, base):
+        m = PIP_SIZE.search(line)
+        if m:
+            cur, total, unit = m.group(1), m.group(2), m.group(3).upper()
+            mul = {"KB": 1, "KIB": 1, "MB": 1024, "MIB": 1024, "GB": 1024 * 1024, "GIB": 1024 * 1024}.get(unit, 1)
+            cur_k, total_k = float(cur) * mul, max(float(total) * mul, 1)
+            pct = base + 30 * (cur_k / total_k)
+            self.set_progress(pct, detail=f"正在下载  {cur} / {total} {unit}")
+            return
+        m = PIP_PCT.search(line)
+        if m:
+            self.set_progress(base + 30 * int(m.group(1)) / 100.0)
+
+    def run_cmd(self, args, env=None, progress_base=None):
         self.append("> " + " ".join(map(str, args)))
-        p = subprocess.Popen(args, cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             text=True, encoding="utf-8", errors="replace")
+        p = subprocess.Popen(
+            args,
+            cwd=str(ROOT),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
         assert p.stdout is not None
-        for line in p.stdout:
-            line = line.rstrip()
-            if line:
-                self.append(line)
+        for raw in p.stdout:
+            line = raw.rstrip()
+            if not line:
+                continue
+            self.append(line)
+            if progress_base is not None:
+                self._parse_pip_progress(line, progress_base)
         code = p.wait()
         if code != 0:
-            raise RuntimeError(f"命令失败({code}): {' '.join(map(str, args))}")
+            raise RuntimeError(f"命令失败 ({code})")
 
     def ensure_venv(self):
-        self.set_progress(5, "1/4 创建虚拟环境", "正在创建本地 Python 环境…")
+        self.set_progress(4, "创建虚拟环境", "正在创建本地 Python 环境…", step=0)
         if VPY.exists():
             self.append("venv 已存在")
+            self.set_progress(18)
             return
         py = self.pick_python()
         self.run_cmd(py + ["-m", "venv", ".venv"])
         if not VPY.exists():
             raise RuntimeError("创建虚拟环境失败，请先安装 Python 3.10+")
+        self.set_progress(18)
 
     def ensure_deps(self):
-        self.set_progress(20, "2/4 安装依赖", "正在检查 / 安装 PyTorch 与 Demucs…")
+        self.set_progress(20, "安装依赖", "正在检查 PyTorch 与 Demucs…", step=1)
         check = subprocess.run([str(VPY), "-c", "import demucs"], cwd=str(ROOT), capture_output=True)
         if check.returncode == 0:
             self.append("demucs 已安装")
-            self.set_progress(55)
+            self.set_progress(58)
             return
         has_nvidia = subprocess.run(["nvidia-smi"], capture_output=True).returncode == 0
         if has_nvidia:
             self.append("检测到 NVIDIA，安装 GPU 版 PyTorch")
+            self.set_progress(22, detail="正在下载 GPU 版 PyTorch，体积较大…")
             try:
-                self.run_cmd([str(VPY), "-m", "pip", "install", "torch==2.7.1+cu126", "torchaudio==2.7.1+cu126",
-                              "--find-links", "https://mirrors.aliyun.com/pytorch-wheels/cu126/",
-                              "-i", "https://pypi.tuna.tsinghua.edu.cn/simple"])
+                self.run_cmd(
+                    [str(VPY), "-m", "pip", "install", "torch==2.7.1+cu126", "torchaudio==2.7.1+cu126",
+                     "--find-links", "https://mirrors.aliyun.com/pytorch-wheels/cu126/",
+                     "-i", "https://pypi.tuna.tsinghua.edu.cn/simple"],
+                    progress_base=22,
+                )
             except Exception:
-                self.run_cmd([str(VPY), "-m", "pip", "install", "torch", "torchaudio",
-                              "--index-url", "https://download.pytorch.org/whl/cu126"])
+                self.run_cmd(
+                    [str(VPY), "-m", "pip", "install", "torch", "torchaudio",
+                     "--index-url", "https://download.pytorch.org/whl/cu126"],
+                    progress_base=22,
+                )
         else:
             self.append("未检测到 NVIDIA，安装 CPU 版 PyTorch")
-            self.run_cmd([str(VPY), "-m", "pip", "install", "torch", "torchaudio",
-                          "-i", "https://pypi.tuna.tsinghua.edu.cn/simple"])
-        self.set_progress(40, detail="正在安装 demucs / soundfile…")
+            self.set_progress(22, detail="正在下载 CPU 版 PyTorch…")
+            self.run_cmd(
+                [str(VPY), "-m", "pip", "install", "torch", "torchaudio",
+                 "-i", "https://pypi.tuna.tsinghua.edu.cn/simple"],
+                progress_base=22,
+            )
+        self.set_progress(48, detail="正在安装 demucs / soundfile…")
         try:
-            self.run_cmd([str(VPY), "-m", "pip", "install", "demucs", "soundfile",
-                          "-i", "https://pypi.tuna.tsinghua.edu.cn/simple"])
+            self.run_cmd(
+                [str(VPY), "-m", "pip", "install", "demucs", "soundfile",
+                 "-i", "https://pypi.tuna.tsinghua.edu.cn/simple"],
+                progress_base=48,
+            )
         except Exception:
-            self.run_cmd([str(VPY), "-m", "pip", "install", "demucs", "soundfile"])
-        self.set_progress(55)
+            self.run_cmd([str(VPY), "-m", "pip", "install", "demucs", "soundfile"], progress_base=48)
+        self.set_progress(58)
+
+    def _download(self, url, dest, base, span):
+        tmp = dest.with_suffix(dest.suffix + ".part")
+
+        def hook(block, block_size, total):
+            got = block * block_size
+            if total > 0:
+                pct = base + span * min(1.0, got / total)
+                self.set_progress(pct, detail=f"正在下载 {dest.name}  ·  {self._human(got)} / {self._human(total)}")
+            else:
+                self.set_progress(base + span * 0.5, detail=f"正在下载 {dest.name}  ·  {self._human(got)}")
+
+        urllib.request.urlretrieve(url, tmp, hook)
+        if not tmp.exists() or tmp.stat().st_size < 10:
+            raise RuntimeError(f"模型下载失败: {dest.name}")
+        tmp.replace(dest)
 
     def ensure_models(self):
-        self.set_progress(60, "3/4 下载模型", "正在检查 AI 模型文件…")
+        self.set_progress(60, "下载模型", "正在检查模型文件…", step=2)
         MODELS.mkdir(parents=True, exist_ok=True)
         missing = [f for f in MODEL_FILES if not (MODELS / f).exists()]
         if not missing:
             self.append("模型已齐全")
-            self.set_progress(85)
+            self.set_progress(86)
             return
         total = len(missing)
-        for i, name in enumerate(missing, 1):
-            self.set_progress(60 + 20 * i / total, detail=f"下载模型 {name} ({i}/{total})")
-            url = f"{MODEL_BASE}/{name}"
-            out = MODELS / name
-            self.run_cmd(["curl", "-sL", "--retry", "3", "-o", str(out), url])
-            if not out.exists() or out.stat().st_size < 10:
-                raise RuntimeError(f"模型下载失败: {name}")
-        self.set_progress(85)
+        for i, name in enumerate(missing):
+            base = 60 + 26 * i / total
+            span = 26 / total
+            self.set_progress(base, detail=f"下载模型 {name}  ({i + 1}/{total})")
+            self._download(f"{MODEL_BASE}/{name}", MODELS / name, base, span)
+        self.set_progress(86)
 
     def ensure_ffmpeg(self):
-        self.set_progress(90, "4/4 检查 FFmpeg", "正在检查 FFmpeg…")
+        self.set_progress(90, "检查工具", "正在检查 FFmpeg…", step=3)
         if self.which("ffmpeg"):
             self.append("FFmpeg 已在 PATH")
             return
@@ -183,7 +332,7 @@ class SetupApp:
             os.environ["PATH"] = str(local.parent) + os.pathsep + os.environ.get("PATH", "")
             self.append("使用本地 runtime/ffmpeg")
             return
-        raise RuntimeError("未找到 FFmpeg。请执行: winget install Gyan.FFmpeg")
+        raise RuntimeError("未找到 FFmpeg。请先执行：winget install Gyan.FFmpeg")
 
     def work(self):
         try:
@@ -192,17 +341,16 @@ class SetupApp:
             self.ensure_models()
             self.ensure_ffmpeg()
             MARKER.write_text("ready\n", encoding="utf-8")
-            self.set_progress(100, "配置完成", "即将启动 NoVoice…")
-            self.append("done")
+            self.set_progress(100, "配置完成", "即将启动 NoVoice…", step=4)
             if EXE.exists():
                 subprocess.Popen([str(EXE)], cwd=str(ROOT))
-                self.root.after(600, self.root.destroy)
+                self.root.after(500, self.root.destroy)
             else:
                 self.root.after(0, lambda: messagebox.showerror("错误", "未找到 NoVoice.exe"))
         except Exception as e:
             self.append(str(e))
-            self.set_progress(self.progress.get(), "配置失败", str(e))
-            self.root.after(0, lambda: messagebox.showerror("配置失败", str(e)))
+            self.set_progress(self._progress, "配置失败", str(e))
+            self.root.after(0, lambda err=str(e): messagebox.showerror("配置失败", err))
 
     def start(self):
         threading.Thread(target=self.work, daemon=True).start()
@@ -212,7 +360,6 @@ class SetupApp:
 
 
 if __name__ == "__main__":
-    # if already configured, just launch
     if MARKER.exists() and EXE.exists():
         subprocess.Popen([str(EXE)], cwd=str(ROOT))
         sys.exit(0)
