@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "scripts" / "installer-art"
@@ -11,51 +11,38 @@ def lerp(a, b, t):
     return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
-def rounded_rect(draw, box, radius, fill):
-    draw.rounded_rectangle(box, radius=radius, fill=fill)
-
-
 def make_sidebar(w=164, h=314):
+    # clean dark gradient, no text, no slash
     img = Image.new("RGB", (w, h), (17, 24, 39))
     draw = ImageDraw.Draw(img)
     for y in range(h):
         t = y / max(1, h - 1)
-        c = lerp((30, 64, 175), (8, 145, 178), t)
+        c = lerp((17, 24, 39), (30, 64, 175), t * 0.85)
         draw.line([(0, y), (w, y)], fill=c)
 
-    # soft overlay panel
-    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    od = ImageDraw.Draw(overlay)
-    od.rounded_rectangle([12, 18, w - 12, h - 18], radius=18, fill=(15, 23, 42, 70))
-    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+    # soft card
+    card = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    cd = ImageDraw.Draw(card)
+    cd.rounded_rectangle([14, 56, w - 14, h - 56], radius=22, fill=(15, 23, 42, 120))
+    img = Image.alpha_composite(img.convert("RGBA"), card).convert("RGB")
     draw = ImageDraw.Draw(img)
 
-    # waveform
-    cx, cy = w / 2, h * 0.42
+    # waveform only
+    cx, cy = w / 2, h / 2
     bars = 7
-    bar_w = 8
-    gap = 6
-    heights = [0.35, 0.55, 0.78, 1.0, 0.7, 0.48, 0.32]
+    bar_w = 9
+    gap = 7
+    heights = [0.32, 0.52, 0.76, 1.0, 0.68, 0.46, 0.28]
     total = bars * bar_w + (bars - 1) * gap
     x0 = cx - total / 2
     for i, hh in enumerate(heights):
-        bh = 70 * hh
+        bh = 96 * hh
         x = x0 + i * (bar_w + gap)
-        draw.rounded_rectangle([x, cy - bh / 2, x + bar_w, cy + bh / 2], radius=4, fill=(255, 255, 255))
-
-    # slash
-    draw.line([(42, 190), (122, 110)], fill=(15, 23, 42), width=8)
-    draw.line([(42, 190), (122, 110)], fill=(255, 255, 255), width=2)
-
-    # title
-    try:
-        font = ImageFont.truetype("C:/Windows/Fonts/segoeuib.ttf", 22)
-        font2 = ImageFont.truetype("C:/Windows/Fonts/segoeui.ttf", 12)
-    except Exception:
-        font = ImageFont.load_default()
-        font2 = font
-    draw.text((w / 2, 230), "NoVoice", fill=(255, 255, 255), font=font, anchor="mm")
-    draw.text((w / 2, 258), "Vocal Remover", fill=(219, 234, 254), font=font2, anchor="mm")
+        draw.rounded_rectangle(
+            [x, cy - bh / 2, x + bar_w, cy + bh / 2],
+            radius=4,
+            fill=(255, 255, 255),
+        )
     return img
 
 
@@ -64,13 +51,20 @@ def make_header(w=150, h=57):
     draw = ImageDraw.Draw(img)
     for x in range(w):
         t = x / max(1, w - 1)
-        c = lerp((37, 99, 235), (6, 182, 212), t)
+        c = lerp((30, 64, 175), (8, 145, 178), t)
         draw.line([(x, 0), (x, h)], fill=c)
-    try:
-        font = ImageFont.truetype("C:/Windows/Fonts/segoeuib.ttf", 16)
-    except Exception:
-        font = ImageFont.load_default()
-    draw.text((14, h / 2), "NoVoice Setup", fill=(255, 255, 255), font=font, anchor="lm")
+    # tiny waveform mark, no text
+    bars = 5
+    bar_w = 4
+    gap = 3
+    heights = [0.4, 0.7, 1.0, 0.65, 0.35]
+    total = bars * bar_w + (bars - 1) * gap
+    x0 = 18
+    cy = h / 2
+    for i, hh in enumerate(heights):
+        bh = 22 * hh
+        x = x0 + i * (bar_w + gap)
+        draw.rounded_rectangle([x, cy - bh / 2, x + bar_w, cy + bh / 2], radius=2, fill=(255, 255, 255))
     return img
 
 
