@@ -33,15 +33,24 @@ fn launch_uninstaller() -> Result<(), String> {
     if !uninst.exists() {
         return Err("当前目录没有卸载程序。可到开始菜单或「应用和功能」里卸载。".into());
     }
-    let mut cmd = std::process::Command::new(&uninst);
-    cmd.current_dir(dir);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &uninst.display().to_string()])
+            .current_dir(dir)
+            .creation_flags(0x08000000)
+            .spawn()
+            .map_err(|e| format!("无法启动卸载程序: {e}"))?;
+        return Ok(());
     }
-    cmd.spawn()
-        .map_err(|e| format!("无法启动卸载程序: {e}"))?;
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new(&uninst)
+            .current_dir(dir)
+            .spawn()
+            .map_err(|e| format!("无法启动卸载程序: {e}"))?;
+    }
     Ok(())
 }
 
