@@ -28,6 +28,10 @@ ICON_CANDIDATES = [
     ROOT / "icon.ico",
     ROOT / "NoVoice.exe",
 ]
+PNG_CANDIDATES = [
+    ROOT / "app.png",
+    ROOT / "icon.png",
+]
 MODEL_MIRRORS = [
     "https://hf-mirror.com/Politrees/UVR_resources/resolve/main/models/Demucs/Demucs_v4/{name}",
     "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/Demucs/Demucs_v4/{name}",
@@ -78,13 +82,8 @@ class SetupApp:
         self.root.geometry("500x268")
         self.root.resizable(False, False)
         self.root.configure(bg=BG)
-        for icon in ICON_CANDIDATES:
-            if icon.exists():
-                try:
-                    self.root.iconbitmap(default=str(icon))
-                    break
-                except Exception:
-                    continue
+        self._icon_img = None
+        self._apply_icon()
 
         self.step = tk.StringVar(value="准备开始")
         self.detail = tk.StringVar(value="首次启动会配置运行环境，只需这一次。")
@@ -143,7 +142,26 @@ class SetupApp:
         self.log.configure(state="disabled")
 
         self.root.after(16, self._tick)
+        self.root.after(30, self._apply_icon)
         self.root.after(180, self.start)
+
+    def _apply_icon(self):
+        for icon in ICON_CANDIDATES:
+            if icon.exists():
+                try:
+                    self.root.iconbitmap(default=str(icon))
+                    self.root.iconbitmap(str(icon))
+                    break
+                except Exception:
+                    continue
+        for png in PNG_CANDIDATES:
+            if png.exists():
+                try:
+                    self._icon_img = tk.PhotoImage(file=str(png))
+                    self.root.iconphoto(True, self._icon_img)
+                    break
+                except Exception:
+                    continue
 
     def _round_rect(self, x1, y1, x2, y2, r, color):
         r = min(r, max(0, (x2 - x1) / 2), max(0, (y2 - y1) / 2))
@@ -342,7 +360,15 @@ class SetupApp:
                     total, ranged, _url = self._probe(urls)
                 except Exception as e:
                     self.append(f"{name} 探测大小失败: {e}")
-                workers = 32 if total >= 64 * 1024 * 1024 else 16 if total >= 8 * 1024 * 1024 else 4
+                if dest.exists() and total > 0 and dest.stat().st_size == total:
+                    self.append(f"{name} 已下完，跳过")
+                    return dest
+                workers = 8 if total >= 8 * 1024 * 1024 else 4
+                part_dir = tmp.parent / (tmp.name + ".parts")
+                if part_dir.exists():
+                    n = len(list(part_dir.glob("*.bin"))) + len(list(part_dir.glob("*.tmp")))
+                    if n >= 16:
+                        workers = min(32, max(8, n))
                 if ranged and total >= 4 * 1024 * 1024:
                     self._download_parts(urls, tmp, dest, base, span, name, total, workers=workers)
                 else:
@@ -355,7 +381,7 @@ class SetupApp:
                 time.sleep(min(4, attempt))
         raise RuntimeError(self._friendly_err(last_err))
 
-    def _download_parts(self, urls, tmp, dest, base, span, name, total, workers=32):
+    def _download_parts(self, urls, tmp, dest, base, span, name, total, workers=8):
         workers = max(4, min(int(workers), 32))
         part_dir = tmp.parent / (tmp.name + ".parts")
         part_dir.mkdir(parents=True, exist_ok=True)
@@ -370,12 +396,10 @@ class SetupApp:
         started = time.time()
         errors = []
         last_report = [0.0]
-        curl = self._curl_bin()
-        engine = "curl" if curl else "py"
 
         def report():
             now = time.time()
-            if now - last_report[0] < 0.15:
+            if now - last_report[0] < 0.12:
                 return
             last_report[0] = now
             abs_got = sum(got)
@@ -384,63 +408,16 @@ class SetupApp:
             pct = base + span * min(1.0, abs_got / max(total, 1))
             self.set_progress(
                 pct,
-                detail=f"{name}  {self._human(abs_got)} / {self._human(total)}  ·  {self._human(speed)}/s  ·  {workers}x{engine}",
+                detail=f"{name}  {self._human(abs_got)} / {self._human(total)}  ·  {self._human(speed)}/s  ·  {workers} 连接",
             )
-
-        def curl_range(url, start, end, part, have):
-            need = end - start + 1
-            if have >= need:
-                return
-            tmp_part = part.with_suffix(".tmp")
-            tmp_part.unlink(missing_ok=True)
-            cmd = [
-                curl, "-fsSL", "--http1.1", "--retry", "2", "--retry-delay", "1",
-                "-A", "Mozilla/5.0 NoVoice-setup",
-                "-H", f"Range: bytes={start + have}-{end}",
-                "--connect-timeout", "8", "--max-time", "0",
-                "-o", str(tmp_part), url,
-            ]
-            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **self._hidden())
-            while p.poll() is None:
-                extra = tmp_part.stat().st_size if tmp_part.exists() else 0
-                with lock:
-                    got[int(part.stem)] = have + extra
-                    report()
-                time.sleep(0.15)
-            if p.returncode != 0:
-                tmp_part.unlink(missing_ok=True)
-                raise RuntimeError(f"curl {p.returncode}")
-            extra = tmp_part.stat().st_size if tmp_part.exists() else 0
-            if extra <= 0:
-                raise RuntimeError("curl 空分段")
-            with open(part, "ab" if have else "wb") as dst, open(tmp_part, "rb") as src:
-                shutil.copyfileobj(src, dst, 1024 * 1024)
-            tmp_part.unlink(missing_ok=True)
-
-        def py_range(url, start, end, part, have):
-            headers = {
-                "User-Agent": "Mozilla/5.0 NoVoice-setup",
-                "Range": f"bytes={start + have}-{end}",
-            }
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                if int(getattr(resp, "status", 206) or 206) >= 400:
-                    raise RuntimeError(f"HTTP {resp.status}")
-                mode = "ab" if have else "wb"
-                wrote = 0
-                with open(part, mode) as f:
-                    while True:
-                        chunk = resp.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        wrote += len(chunk)
-                        with lock:
-                            got[int(part.stem)] = have + wrote
-                            report()
 
         def worker(idx, start, end):
             part = part_dir / f"{idx:02d}.bin"
+            leftover = part.with_suffix(".tmp")
+            if leftover.exists() and not part.exists():
+                leftover.replace(part)
+            elif leftover.exists():
+                leftover.unlink(missing_ok=True)
             have = part.stat().st_size if part.exists() else 0
             need = end - start + 1
             if have > need:
@@ -454,10 +431,26 @@ class SetupApp:
             rotated = urls[idx % len(urls):] + urls[: idx % len(urls)]
             for url in rotated:
                 try:
-                    if curl:
-                        curl_range(url, start, end, part, have)
-                    else:
-                        py_range(url, start, end, part, have)
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 NoVoice-setup",
+                        "Range": f"bytes={start + have}-{end}",
+                    }
+                    req = urllib.request.Request(url, headers=headers)
+                    with urllib.request.urlopen(req, timeout=20) as resp:
+                        if int(getattr(resp, "status", 206) or 206) >= 400:
+                            raise RuntimeError(f"HTTP {resp.status}")
+                        mode = "ab" if have else "wb"
+                        wrote = 0
+                        with open(part, mode) as f:
+                            while True:
+                                chunk = resp.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                                wrote += len(chunk)
+                                with lock:
+                                    got[idx] = have + wrote
+                                    report()
                     final = part.stat().st_size if part.exists() else 0
                     if final != need:
                         raise RuntimeError(f"分段 {idx} 不完整 {final}/{need}")
