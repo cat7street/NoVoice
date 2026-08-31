@@ -10,7 +10,7 @@ A '!include "nsDialogs.nsh"'
 A '!include "LogicLib.nsh"'
 A ''
 A 'Name "NoVoice"'
-A 'OutFile "..\release\NoVoice-Setup.exe"'
+A 'OutFile "..\release\NoVoice-Setup.tmp.exe"'
 A 'InstallDir "$LOCALAPPDATA\NoVoice"'
 A 'RequestExecutionLevel user'
 A 'SetCompressor /SOLID lzma'
@@ -112,10 +112,20 @@ $path = Join-Path (Get-Location) 'scripts\NoVoice-Setup.nsi'
 [IO.File]::WriteAllText($path, $nsi, $utf16)
 
 $makensis = 'C:\Users\52352\AppData\Local\tauri\NSIS\makensis.exe'
+Get-Process 'NoVoice-Setup' -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 300
 Push-Location scripts
 & $makensis 'NoVoice-Setup.nsi'
 $code = $LASTEXITCODE
 Pop-Location
 Write-Output ('exit=' + $code)
-if ($code -eq 0) { Get-Item 'release\NoVoice-Setup.exe' | Format-List Name,Length,LastWriteTime }
+if ($code -eq 0) {
+  $tmp = Join-Path (Get-Location) 'release\NoVoice-Setup.tmp.exe'
+  $out = Join-Path (Get-Location) 'release\NoVoice-Setup.exe'
+  if (-not (Test-Path $tmp)) { throw 'missing tmp setup' }
+  $len = (Get-Item $tmp).Length
+  if ($len -lt 60MB) { throw "setup too small: $len" }
+  Move-Item -Force $tmp $out
+  Get-Item $out | Format-List Name,Length,LastWriteTime
+}
 else { Write-Output 'BUILD_FAILED' }
