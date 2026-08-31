@@ -2,6 +2,7 @@
 import math
 import os
 import re
+import shutil
 import sys
 import subprocess
 import threading
@@ -288,46 +289,65 @@ class SetupApp:
             return "网络中断，正在重试"
         return msg
 
+    def _as_urls(self, url_or_urls):
+        if isinstance(url_or_urls, (list, tuple)):
+            return [u for u in url_or_urls if u]
+        return [url_or_urls]
+
     def _head_size(self, url):
         req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Mozilla/5.0 NoVoice-setup"})
         try:
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                return int(resp.headers.get("Content-Length") or 0), (resp.headers.get("Accept-Ranges") or "").lower() == "bytes"
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                return int(resp.headers.get("Content-Length") or 0), (resp.headers.get("Accept-Ranges") or "").lower() == "bytes", url
         except Exception:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 NoVoice-setup", "Range": "bytes=0-0"})
-            with urllib.request.urlopen(req, timeout=12) as resp:
+            with urllib.request.urlopen(req, timeout=8) as resp:
                 cr = resp.headers.get("Content-Range") or ""
                 if "/" in cr:
-                    return int(cr.rsplit("/", 1)[-1]), True
-                return int(resp.headers.get("Content-Length") or 0), resp.status == 206
+                    return int(cr.rsplit("/", 1)[-1]), True, url
+                return int(resp.headers.get("Content-Length") or 0), resp.status == 206, url
 
-    def _download(self, url, dest, base, span, label=None, retries=6):
+    def _probe(self, urls):
+        last = None
+        for url in urls:
+            try:
+                return self._head_size(url)
+            except Exception as e:
+                last = e
+                self.append(f"探测失败 {url}: {e}")
+        if last:
+            raise last
+        raise RuntimeError("没有可用下载源")
+
+    def _download(self, url_or_urls, dest, base, span, label=None, retries=5):
         CACHE.mkdir(parents=True, exist_ok=True)
         dest.parent.mkdir(parents=True, exist_ok=True)
+        urls = self._as_urls(url_or_urls)
         tmp = dest.with_suffix(dest.suffix + ".part")
         name = label or dest.name
         last_err = None
         for attempt in range(1, retries + 1):
             try:
-                total, ranged = 0, False
+                total, ranged, _url = 0, False, urls[0]
                 try:
-                    total, ranged = self._head_size(url)
+                    total, ranged, _url = self._probe(urls)
                 except Exception as e:
                     self.append(f"{name} 探测大小失败: {e}")
-                if ranged and total >= 8 * 1024 * 1024:
-                    self._download_parts(url, tmp, dest, base, span, name, total)
+                workers = 16 if total >= 64 * 1024 * 1024 else 8 if total >= 8 * 1024 * 1024 else 4
+                if ranged and total >= 4 * 1024 * 1024:
+                    self._download_parts(urls, tmp, dest, base, span, name, total, workers=workers)
                 else:
-                    self._download_once(url, tmp, dest, base, span, name)
+                    self._download_once(urls[0], tmp, dest, base, span, name)
                 return dest
             except Exception as e:
                 last_err = e
                 self.append(f"{name} 第 {attempt}/{retries} 次失败: {e}")
                 self.set_progress(base, detail=self._friendly_err(e), crawl=True)
-                time.sleep(min(6, attempt * 1.2))
+                time.sleep(min(4, attempt))
         raise RuntimeError(self._friendly_err(last_err))
 
-    def _download_parts(self, url, tmp, dest, base, span, name, total, workers=8):
-        workers = max(2, min(workers, 8))
+    def _download_parts(self, urls, tmp, dest, base, span, name, total, workers=16):
+        workers = max(4, min(int(workers), 16))
         part_dir = tmp.parent / (tmp.name + ".parts")
         part_dir.mkdir(parents=True, exist_ok=True)
         size = total // workers
@@ -340,48 +360,70 @@ class SetupApp:
         lock = threading.Lock()
         started = time.time()
         errors = []
+        last_report = [0.0]
 
         def report():
+            now = time.time()
+            if now - last_report[0] < 0.12:
+                return
+            last_report[0] = now
             abs_got = sum(got)
-            dt = max(time.time() - started, 0.2)
+            dt = max(now - started, 0.2)
             speed = abs_got / dt
             pct = base + span * min(1.0, abs_got / max(total, 1))
             self.set_progress(
                 pct,
-                detail=f"{name}  {self._human(abs_got)} / {self._human(total)}  ·  {self._human(speed)}/s  ·  {workers} 线程",
+                detail=f"{name}  {self._human(abs_got)} / {self._human(total)}  ·  {self._human(speed)}/s  ·  {workers} 连接",
             )
 
         def worker(idx, start, end):
             part = part_dir / f"{idx:02d}.bin"
             have = part.stat().st_size if part.exists() else 0
-            if have > (end - start + 1):
+            need = end - start + 1
+            if have > need:
                 part.unlink(missing_ok=True)
                 have = 0
-            if have == end - start + 1:
+            if have == need:
                 with lock:
                     got[idx] = have
                 return
-            headers = {
-                "User-Agent": "Mozilla/5.0 NoVoice-setup",
-                "Range": f"bytes={start + have}-{end}",
-            }
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                if int(getattr(resp, "status", 206) or 206) >= 400:
-                    raise RuntimeError(f"HTTP {resp.status}")
-                mode = "ab" if have else "wb"
-                with open(part, mode) as f:
-                    while True:
-                        chunk = resp.read(1024 * 256)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        with lock:
-                            got[idx] += len(chunk)
-                            report()
-            final = part.stat().st_size
-            if final != end - start + 1:
-                raise RuntimeError(f"分段 {idx} 不完整")
+            last = None
+            rotated = urls[idx % len(urls):] + urls[: idx % len(urls)]
+            for url in rotated:
+                try:
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 NoVoice-setup",
+                        "Range": f"bytes={start + have}-{end}",
+                    }
+                    req = urllib.request.Request(url, headers=headers)
+                    with urllib.request.urlopen(req, timeout=20) as resp:
+                        if int(getattr(resp, "status", 206) or 206) >= 400:
+                            raise RuntimeError(f"HTTP {resp.status}")
+                        mode = "ab" if have else "wb"
+                        wrote = 0
+                        with open(part, mode) as f:
+                            while True:
+                                chunk = resp.read(1024 * 512)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                                wrote += len(chunk)
+                                with lock:
+                                    got[idx] = have + wrote
+                                    report()
+                    final = part.stat().st_size
+                    if final != need:
+                        raise RuntimeError(f"分段 {idx} 不完整 {final}/{need}")
+                    with lock:
+                        got[idx] = final
+                    return
+                except Exception as e:
+                    last = e
+                    have = part.stat().st_size if part.exists() else 0
+                    if have > need:
+                        part.unlink(missing_ok=True)
+                        have = 0
+            raise last or RuntimeError(f"分段 {idx} 失败")
 
         threads = []
         for item in ranges:
@@ -396,11 +438,7 @@ class SetupApp:
             for i, start, end in ranges:
                 part = part_dir / f"{i:02d}.bin"
                 with open(part, "rb") as src:
-                    while True:
-                        chunk = src.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        out.write(chunk)
+                    shutil.copyfileobj(src, out, 1024 * 1024)
         for child in part_dir.glob("*"):
             child.unlink(missing_ok=True)
         part_dir.rmdir()
@@ -546,24 +584,15 @@ class SetupApp:
         self.set_progress(16)
 
     def _install_wheel(self, label, urls, base, span):
-        last_err = None
-        for url in urls:
-            try:
-                name = urllib.request.unquote(url.rsplit("/", 1)[-1])
-                dest = CACHE / name
-                if not dest.exists() or dest.stat().st_size < 1024 * 1024:
-                    self.set_progress(base, detail=f"正在下载 {label}…", crawl=True)
-                    self._download(url, dest, base, span * 0.85, label=label)
-                else:
-                    self.append(f"{label} 缓存已存在")
-                self.set_progress(base + span * 0.88, detail=f"正在安装 {label}…", crawl=True)
-                self.run_cmd([str(VPY), "-m", "pip", "install", str(dest), "-i", PIPI], progress_base=base + span * 0.88)
-                return
-            except Exception as e:
-                last_err = e
-                self.append(f"{label} 失败，换源: {e}")
-        if last_err:
-            raise last_err
+        name = urllib.request.unquote(urls[0].rsplit("/", 1)[-1])
+        dest = CACHE / name
+        if not dest.exists() or dest.stat().st_size < 1024 * 1024:
+            self.set_progress(base, detail=f"正在榨带宽下载 {label}…", crawl=True)
+            self._download(urls, dest, base, span * 0.85, label=label)
+        else:
+            self.append(f"{label} 缓存已存在")
+        self.set_progress(base + span * 0.88, detail=f"正在安装 {label}…", crawl=True)
+        self.run_cmd([str(VPY), "-m", "pip", "install", str(dest), "-i", PIPI], progress_base=base + span * 0.88)
 
     def ensure_deps(self):
         self.set_progress(18, "安装依赖", "正在检查 PyTorch 与 Demucs…", step=1, crawl=True)
@@ -621,21 +650,10 @@ class SetupApp:
             base = 60 + 26 * i / total
             span = 26 / total
             self.set_progress(base, detail=f"下载模型 {name}  ({i + 1}/{total})", crawl=True)
-            last_err = None
             urls = [tpl.format(name=name) for tpl in MODEL_MIRRORS]
             if not name.endswith(".th"):
                 urls = urls[:2]
-            for url in urls:
-                try:
-                    self.append(f"GET {url}")
-                    self._download(url, MODELS / name, base, span, label=name)
-                    last_err = None
-                    break
-                except Exception as e:
-                    last_err = e
-                    self.append(f"{name} 源失败，换源: {e}")
-            if last_err:
-                raise last_err
+            self._download(urls, MODELS / name, base, span, label=name)
         self.set_progress(86)
 
     def ensure_ffmpeg(self):
