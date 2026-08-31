@@ -274,46 +274,97 @@ class SetupApp:
             n /= 1024
         return f"{n:.1f} GB"
 
-    def _download(self, url, dest, base, span, label=None):
+    def _friendly_err(self, err):
+        msg = str(err)
+        low = msg.lower()
+        if "timed out" in low or "timeout" in low:
+            return "下载超时，正在自动重试（已下载部分会续传）"
+        if "403" in msg:
+            return "源站拒绝访问 (403)，正在换源"
+        if "404" in msg:
+            return "文件不存在 (404)，正在换源"
+        if "10054" in msg or "connection" in low or "reset" in low:
+            return "网络中断，正在重试"
+        return msg
+
+    def _download(self, url, dest, base, span, label=None, retries=6):
         CACHE.mkdir(parents=True, exist_ok=True)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(dest.suffix + ".part")
         name = label or dest.name
-        started = time.time()
+        last_err = None
+        for attempt in range(1, retries + 1):
+            try:
+                self._download_once(url, tmp, dest, base, span, name)
+                return dest
+            except Exception as e:
+                last_err = e
+                self.append(f"{name} 第 {attempt}/{retries} 次失败: {e}")
+                self.set_progress(base, detail=self._friendly_err(e), crawl=True)
+                time.sleep(min(8, attempt * 1.5))
+        raise RuntimeError(self._friendly_err(last_err))
 
-        def hook(block, block_size, total):
-            got = block * block_size
-            dt = max(time.time() - started, 0.2)
-            speed = got / dt
-            if total > 0:
-                pct = base + span * min(1.0, got / total)
-                self.set_progress(pct, detail=f"{name}  {self._human(got)} / {self._human(total)}  ·  {self._human(speed)}/s")
-            else:
-                self.set_progress(base + min(span * 0.9, span * 0.15 + elapsed_ratio(got)),
-                                  detail=f"{name}  {self._human(got)}  ·  {self._human(speed)}/s", crawl=True)
-
-        def elapsed_ratio(got):
-            return min(0.8, math.log10(max(got, 1)) / 10)
-
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 NoVoice-setup"})
+    def _download_once(self, url, tmp, dest, base, span, name):
+        existing = tmp.stat().st_size if tmp.exists() else 0
+        headers = {"User-Agent": "Mozilla/5.0 NoVoice-setup"}
+        if existing > 0:
+            headers["Range"] = f"bytes={existing}-"
+        req = urllib.request.Request(url, headers=headers)
         opener = urllib.request.build_opener()
-        with opener.open(req, timeout=60) as resp:
-            if getattr(resp, "status", 200) >= 400:
-                raise RuntimeError(f"HTTP {resp.status}")
+        started = time.time()
+        got_session = 0
+        with opener.open(req, timeout=30) as resp:
+            status = int(getattr(resp, "status", 200) or 200)
+            if status >= 400:
+                raise RuntimeError(f"HTTP {status}")
+            if status == 200 and existing > 0:
+                existing = 0
+                mode = "wb"
+            else:
+                mode = "ab" if existing > 0 else "wb"
             total = int(resp.headers.get("Content-Length") or 0)
-            got = 0
-            with open(tmp, "wb") as f:
+            if status == 206:
+                cr = resp.headers.get("Content-Range") or ""
+                if "/" in cr:
+                    try:
+                        total = int(cr.rsplit("/", 1)[-1])
+                    except ValueError:
+                        total = existing + total
+                else:
+                    total = existing + total
+            elif status == 200:
+                existing = 0
+            else:
+                total = existing + total if total else 0
+
+            def report(abs_got):
+                dt = max(time.time() - started, 0.2)
+                speed = max(got_session, 1) / dt
+                if total > 0:
+                    pct = base + span * min(1.0, abs_got / total)
+                    self.set_progress(
+                        pct,
+                        detail=f"{name}  {self._human(abs_got)} / {self._human(total)}  ·  {self._human(speed)}/s",
+                    )
+                else:
+                    self.set_progress(
+                        base + min(span * 0.9, span * 0.2),
+                        detail=f"{name}  {self._human(abs_got)}  ·  {self._human(speed)}/s",
+                        crawl=True,
+                    )
+
+            with open(tmp, mode) as f:
                 while True:
-                    chunk = resp.read(1024 * 256)
+                    chunk = resp.read(1024 * 512)
                     if not chunk:
                         break
                     f.write(chunk)
-                    got += len(chunk)
-                    hook(max(got, 1), 1, total)
-        if not tmp.exists() or tmp.stat().st_size < 10:
+                    got_session += len(chunk)
+                    report(existing + got_session)
+        size = tmp.stat().st_size if tmp.exists() else 0
+        if size < 10:
             raise RuntimeError(f"下载失败: {name}")
         tmp.replace(dest)
-        return dest
 
     def _parse_pip_progress(self, line, base):
         m = PIP_SIZE.search(line)
@@ -488,9 +539,10 @@ class SetupApp:
             else:
                 self.root.after(0, lambda: messagebox.showerror("错误", "未找到 NoVoice.exe"))
         except Exception as e:
+            msg = self._friendly_err(e)
             self.append(str(e))
-            self.set_progress(self._progress, "配置失败", str(e))
-            self.root.after(0, lambda err=str(e): messagebox.showerror("配置失败", err))
+            self.set_progress(self._progress, "配置失败", msg)
+            self.root.after(0, lambda err=msg: messagebox.showerror("配置失败", err))
 
     def start(self):
         threading.Thread(target=self.work, daemon=True).start()
