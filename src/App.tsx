@@ -440,10 +440,7 @@ export default function App() {
                 onClick={async () => {
                   try {
                     await invoke("launch_uninstaller");
-                    await getCurrentWindow().hide();
-                    window.setTimeout(() => {
-                      getCurrentWindow().close().catch(() => {});
-                    }, 80);
+                    try { await getCurrentWindow().close(); } catch {}
                   } catch (e) {
                     const msg = String(e);
                     pushLog("err", msg);
