@@ -56,13 +56,18 @@ fn launch_uninstaller() -> Result<(), String> {
         .unwrap_or_else(|| PathBuf::from("."));
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &uninst.display().to_string()])
+        let path = uninst.display().to_string();
+        let r = std::process::Command::new("explorer.exe")
+            .arg(&path)
             .current_dir(&dir)
-            .creation_flags(0x08000000)
-            .spawn()
-            .map_err(|e| format!("无法启动卸载程序: {e}"))?;
+            .spawn();
+        if r.is_err() {
+            std::process::Command::new("rundll32.exe")
+                .args(["url.dll,FileProtocolHandler", &path])
+                .current_dir(&dir)
+                .spawn()
+                .map_err(|e| format!("无法启动卸载程序: {e}"))?;
+        }
         return Ok(());
     }
     #[cfg(not(windows))]
