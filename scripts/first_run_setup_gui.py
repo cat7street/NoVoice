@@ -72,7 +72,7 @@ class SetupApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("NoVoice")
-        self.root.geometry("560x320")
+        self.root.geometry("500x268")
         self.root.resizable(False, False)
         self.root.configure(bg=BG)
         for icon in ICON_CANDIDATES:
@@ -97,37 +97,37 @@ class SetupApp:
         self._animating = True
 
         outer = tk.Frame(self.root, bg=BG)
-        outer.pack(fill="both", expand=True, padx=18, pady=16)
+        outer.pack(fill="both", expand=True, padx=20, pady=16)
 
         head = tk.Frame(outer, bg=BG)
         head.pack(fill="x")
-        tk.Label(head, text="NoVoice", fg=TEXT, bg=BG, font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w")
-        tk.Label(head, text="正在准备运行环境", fg=MUTED, bg=BG, font=("Microsoft YaHei UI", 10)).pack(anchor="w", pady=(2, 12))
+        tk.Label(head, text="NoVoice", fg=TEXT, bg=BG, font=("Microsoft YaHei UI", 15, "bold")).pack(anchor="w")
+        tk.Label(head, text="正在准备运行环境", fg=MUTED, bg=BG, font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(1, 10))
 
         self.steps_frame = tk.Frame(outer, bg=BG)
-        self.steps_frame.pack(fill="x", pady=(0, 14))
+        self.steps_frame.pack(fill="x", pady=(0, 12))
         self.step_labels = []
-        names = ["创建环境", "安装依赖", "下载模型", "检查工具"]
+        names = ["环境", "依赖", "模型", "工具"]
         for i, name in enumerate(names):
-            lab = tk.Label(self.steps_frame, text=f"{i + 1}  {name}", fg=MUTED, bg=PANEL,
-                           font=("Microsoft YaHei UI", 9), padx=10, pady=6)
+            lab = tk.Label(self.steps_frame, text=name, fg=MUTED, bg="#162033",
+                           font=("Microsoft YaHei UI", 9), padx=12, pady=5)
             lab.pack(side="left", padx=(0 if i == 0 else 6, 0))
             self.step_labels.append(lab)
 
-        card = tk.Frame(outer, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
+        card = tk.Frame(outer, bg="#162033", highlightbackground=LINE, highlightthickness=1)
         card.pack(fill="x")
-        inner = tk.Frame(card, bg=PANEL)
+        inner = tk.Frame(card, bg="#162033")
         inner.pack(fill="x", padx=14, pady=12)
 
-        row = tk.Frame(inner, bg=PANEL)
+        row = tk.Frame(inner, bg="#162033")
         row.pack(fill="x")
-        tk.Label(row, textvariable=self.step, fg=TEXT, bg=PANEL, font=("Microsoft YaHei UI", 11)).pack(side="left")
-        tk.Label(row, textvariable=self.percent, fg=ACCENT, bg=PANEL, font=("Microsoft YaHei UI", 11)).pack(side="right")
+        tk.Label(row, textvariable=self.step, fg=TEXT, bg="#162033", font=("Microsoft YaHei UI", 10)).pack(side="left")
+        tk.Label(row, textvariable=self.percent, fg=TEXT, bg="#162033", font=("Microsoft YaHei UI", 10)).pack(side="right")
 
-        tk.Label(inner, textvariable=self.detail, fg=MUTED, bg=PANEL, font=("Microsoft YaHei UI", 9),
-                 wraplength=500, justify="left").pack(anchor="w", pady=(4, 10))
+        tk.Label(inner, textvariable=self.detail, fg=MUTED, bg="#162033", font=("Microsoft YaHei UI", 9),
+                 wraplength=440, justify="left").pack(anchor="w", pady=(6, 10))
 
-        self.canvas = tk.Canvas(inner, height=10, bg=PANEL, highlightthickness=0, bd=0)
+        self.canvas = tk.Canvas(inner, height=6, bg="#162033", highlightthickness=0, bd=0)
         self.canvas.pack(fill="x")
         self.canvas.bind("<Configure>", lambda _e: self._draw_bar())
 
@@ -156,13 +156,11 @@ class SetupApp:
     def _draw_bar(self):
         self.canvas.delete("all")
         w = max(self.canvas.winfo_width(), 1)
-        h = 10
-        r = 5
-        self.canvas.create_rectangle(0, 0, w, h, fill=PANEL, outline="")
-        self._round_rect(0, 0, w, h, r, "#0f172a")
+        h = 6
+        self.canvas.create_rectangle(0, 0, w, h, fill="#0b1220", outline="")
         fill = int(w * max(0.0, min(1.0, self._shown / 100.0)))
-        if fill > 1:
-            self._round_rect(0, 0, fill, h, r, ACCENT)
+        if fill > 0:
+            self.canvas.create_rectangle(0, 0, fill, h, fill=ACCENT, outline="")
         self.percent.set(f"{int(self._shown)}%")
 
     def _tick(self):
@@ -179,9 +177,6 @@ class SetupApp:
         else:
             shown += delta * 0.16
         self._shown = max(0.0, min(99.4 if self._progress < 100 else 100.0, shown))
-        self._pulse = (self._pulse + 0.04) % (math.pi * 2)
-        if self._active_step >= 0:
-            self._paint_steps()
         self._draw_bar()
         self.root.after(16, self._tick)
 
@@ -190,22 +185,21 @@ class SetupApp:
         if self.show_log:
             self.toggle.configure(text="隐藏详情")
             self.log.pack(fill="both", expand=True, pady=(8, 0))
-            self.root.geometry("560x460")
+            self.root.geometry("500x400")
         else:
             self.toggle.configure(text="显示详情")
             self.log.pack_forget()
-            self.root.geometry("560x320")
+            self.root.geometry("500x268")
 
     def _paint_steps(self):
         idx = self._active_step
-        pulse = 0.5 + 0.5 * math.sin(self._pulse)
         for i, lab in enumerate(self.step_labels):
             if i < idx:
-                lab.configure(fg="#86efac", bg="#14532d")
+                lab.configure(fg="#86efac", bg="#123524")
             elif i == idx:
-                lab.configure(fg="#eff6ff", bg="#1d4ed8" if pulse > 0.35 else "#1e40af")
+                lab.configure(fg="#eff6ff", bg="#1d4ed8")
             else:
-                lab.configure(fg=MUTED, bg=PANEL)
+                lab.configure(fg=MUTED, bg="#162033")
 
     def _set_step(self, idx):
         self._active_step = idx
@@ -294,6 +288,19 @@ class SetupApp:
             return "网络中断，正在重试"
         return msg
 
+    def _head_size(self, url):
+        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Mozilla/5.0 NoVoice-setup"})
+        try:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                return int(resp.headers.get("Content-Length") or 0), (resp.headers.get("Accept-Ranges") or "").lower() == "bytes"
+        except Exception:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 NoVoice-setup", "Range": "bytes=0-0"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                cr = resp.headers.get("Content-Range") or ""
+                if "/" in cr:
+                    return int(cr.rsplit("/", 1)[-1]), True
+                return int(resp.headers.get("Content-Length") or 0), resp.status == 206
+
     def _download(self, url, dest, base, span, label=None, retries=6):
         CACHE.mkdir(parents=True, exist_ok=True)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -302,14 +309,110 @@ class SetupApp:
         last_err = None
         for attempt in range(1, retries + 1):
             try:
-                self._download_once(url, tmp, dest, base, span, name)
+                total, ranged = 0, False
+                try:
+                    total, ranged = self._head_size(url)
+                except Exception as e:
+                    self.append(f"{name} 探测大小失败: {e}")
+                if ranged and total >= 8 * 1024 * 1024:
+                    self._download_parts(url, tmp, dest, base, span, name, total)
+                else:
+                    self._download_once(url, tmp, dest, base, span, name)
                 return dest
             except Exception as e:
                 last_err = e
                 self.append(f"{name} 第 {attempt}/{retries} 次失败: {e}")
                 self.set_progress(base, detail=self._friendly_err(e), crawl=True)
-                time.sleep(min(8, attempt * 1.5))
+                time.sleep(min(6, attempt * 1.2))
         raise RuntimeError(self._friendly_err(last_err))
+
+    def _download_parts(self, url, tmp, dest, base, span, name, total, workers=8):
+        workers = max(2, min(workers, 8))
+        part_dir = tmp.parent / (tmp.name + ".parts")
+        part_dir.mkdir(parents=True, exist_ok=True)
+        size = total // workers
+        ranges = []
+        for i in range(workers):
+            start = i * size
+            end = total - 1 if i == workers - 1 else (i + 1) * size - 1
+            ranges.append((i, start, end))
+        got = [0] * workers
+        lock = threading.Lock()
+        started = time.time()
+        errors = []
+
+        def report():
+            abs_got = sum(got)
+            dt = max(time.time() - started, 0.2)
+            speed = abs_got / dt
+            pct = base + span * min(1.0, abs_got / max(total, 1))
+            self.set_progress(
+                pct,
+                detail=f"{name}  {self._human(abs_got)} / {self._human(total)}  ·  {self._human(speed)}/s  ·  {workers} 线程",
+            )
+
+        def worker(idx, start, end):
+            part = part_dir / f"{idx:02d}.bin"
+            have = part.stat().st_size if part.exists() else 0
+            if have > (end - start + 1):
+                part.unlink(missing_ok=True)
+                have = 0
+            if have == end - start + 1:
+                with lock:
+                    got[idx] = have
+                return
+            headers = {
+                "User-Agent": "Mozilla/5.0 NoVoice-setup",
+                "Range": f"bytes={start + have}-{end}",
+            }
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                if int(getattr(resp, "status", 206) or 206) >= 400:
+                    raise RuntimeError(f"HTTP {resp.status}")
+                mode = "ab" if have else "wb"
+                with open(part, mode) as f:
+                    while True:
+                        chunk = resp.read(1024 * 256)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        with lock:
+                            got[idx] += len(chunk)
+                            report()
+            final = part.stat().st_size
+            if final != end - start + 1:
+                raise RuntimeError(f"分段 {idx} 不完整")
+
+        threads = []
+        for item in ranges:
+            t = threading.Thread(target=lambda it=item: self._safe_part(worker, it, errors), daemon=True)
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join()
+        if errors:
+            raise errors[0]
+        with open(tmp, "wb") as out:
+            for i, start, end in ranges:
+                part = part_dir / f"{i:02d}.bin"
+                with open(part, "rb") as src:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+        for child in part_dir.glob("*"):
+            child.unlink(missing_ok=True)
+        part_dir.rmdir()
+        if tmp.stat().st_size != total:
+            raise RuntimeError(f"下载失败: {name}")
+        tmp.replace(dest)
+
+    def _safe_part(self, fn, item, errors):
+        try:
+            fn(*item)
+        except Exception as e:
+            errors.append(e)
 
     def _download_once(self, url, tmp, dest, base, span, name):
         existing = tmp.stat().st_size if tmp.exists() else 0
@@ -317,10 +420,9 @@ class SetupApp:
         if existing > 0:
             headers["Range"] = f"bytes={existing}-"
         req = urllib.request.Request(url, headers=headers)
-        opener = urllib.request.build_opener()
         started = time.time()
         got_session = 0
-        with opener.open(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=20) as resp:
             status = int(getattr(resp, "status", 200) or 200)
             if status >= 400:
                 raise RuntimeError(f"HTTP {status}")
@@ -341,8 +443,6 @@ class SetupApp:
                     total = existing + total
             elif status == 200:
                 existing = 0
-            else:
-                total = existing + total if total else 0
 
             def report(abs_got):
                 dt = max(time.time() - started, 0.2)
