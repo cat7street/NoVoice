@@ -52,10 +52,12 @@ LOCAL_MODEL_HINTS = [
 PIPI = "https://pypi.tuna.tsinghua.edu.cn/simple"
 TORCH_GPU = [
     "https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.7.1%2Bcu126-cp312-cp312-win_amd64.whl",
+    "https://mirror.sjtu.edu.cn/pytorch-wheels/cu126/torch-2.7.1%2Bcu126-cp312-cp312-win_amd64.whl",
     "https://download.pytorch.org/whl/cu126/torch-2.7.1%2Bcu126-cp312-cp312-win_amd64.whl",
 ]
 TORCHAUDIO_GPU = [
     "https://mirrors.aliyun.com/pytorch-wheels/cu126/torchaudio-2.7.1%2Bcu126-cp312-cp312-win_amd64.whl",
+    "https://mirror.sjtu.edu.cn/pytorch-wheels/cu126/torchaudio-2.7.1%2Bcu126-cp312-cp312-win_amd64.whl",
     "https://download.pytorch.org/whl/cu126/torchaudio-2.7.1%2Bcu126-cp312-cp312-win_amd64.whl",
 ]
 
@@ -294,6 +296,13 @@ class SetupApp:
             return [u for u in url_or_urls if u]
         return [url_or_urls]
 
+    def _curl_bin(self):
+        windir = os.environ.get("SystemRoot", r"C:\Windows")
+        for p in (Path(windir) / "System32" / "curl.exe", Path(r"C:\Windows\System32\curl.exe")):
+            if p.exists():
+                return str(p)
+        return shutil.which("curl.exe") or shutil.which("curl")
+
     def _head_size(self, url):
         req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Mozilla/5.0 NoVoice-setup"})
         try:
@@ -333,7 +342,7 @@ class SetupApp:
                     total, ranged, _url = self._probe(urls)
                 except Exception as e:
                     self.append(f"{name} 探测大小失败: {e}")
-                workers = 16 if total >= 64 * 1024 * 1024 else 8 if total >= 8 * 1024 * 1024 else 4
+                workers = 32 if total >= 64 * 1024 * 1024 else 16 if total >= 8 * 1024 * 1024 else 4
                 if ranged and total >= 4 * 1024 * 1024:
                     self._download_parts(urls, tmp, dest, base, span, name, total, workers=workers)
                 else:
@@ -346,8 +355,8 @@ class SetupApp:
                 time.sleep(min(4, attempt))
         raise RuntimeError(self._friendly_err(last_err))
 
-    def _download_parts(self, urls, tmp, dest, base, span, name, total, workers=16):
-        workers = max(4, min(int(workers), 16))
+    def _download_parts(self, urls, tmp, dest, base, span, name, total, workers=32):
+        workers = max(4, min(int(workers), 32))
         part_dir = tmp.parent / (tmp.name + ".parts")
         part_dir.mkdir(parents=True, exist_ok=True)
         size = total // workers
@@ -361,10 +370,12 @@ class SetupApp:
         started = time.time()
         errors = []
         last_report = [0.0]
+        curl = self._curl_bin()
+        engine = "curl" if curl else "py"
 
         def report():
             now = time.time()
-            if now - last_report[0] < 0.12:
+            if now - last_report[0] < 0.15:
                 return
             last_report[0] = now
             abs_got = sum(got)
@@ -373,8 +384,60 @@ class SetupApp:
             pct = base + span * min(1.0, abs_got / max(total, 1))
             self.set_progress(
                 pct,
-                detail=f"{name}  {self._human(abs_got)} / {self._human(total)}  ·  {self._human(speed)}/s  ·  {workers} 连接",
+                detail=f"{name}  {self._human(abs_got)} / {self._human(total)}  ·  {self._human(speed)}/s  ·  {workers}x{engine}",
             )
+
+        def curl_range(url, start, end, part, have):
+            need = end - start + 1
+            if have >= need:
+                return
+            tmp_part = part.with_suffix(".tmp")
+            tmp_part.unlink(missing_ok=True)
+            cmd = [
+                curl, "-fsSL", "--http1.1", "--retry", "2", "--retry-delay", "1",
+                "-A", "Mozilla/5.0 NoVoice-setup",
+                "-H", f"Range: bytes={start + have}-{end}",
+                "--connect-timeout", "8", "--max-time", "0",
+                "-o", str(tmp_part), url,
+            ]
+            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **self._hidden())
+            while p.poll() is None:
+                extra = tmp_part.stat().st_size if tmp_part.exists() else 0
+                with lock:
+                    got[int(part.stem)] = have + extra
+                    report()
+                time.sleep(0.15)
+            if p.returncode != 0:
+                tmp_part.unlink(missing_ok=True)
+                raise RuntimeError(f"curl {p.returncode}")
+            extra = tmp_part.stat().st_size if tmp_part.exists() else 0
+            if extra <= 0:
+                raise RuntimeError("curl 空分段")
+            with open(part, "ab" if have else "wb") as dst, open(tmp_part, "rb") as src:
+                shutil.copyfileobj(src, dst, 1024 * 1024)
+            tmp_part.unlink(missing_ok=True)
+
+        def py_range(url, start, end, part, have):
+            headers = {
+                "User-Agent": "Mozilla/5.0 NoVoice-setup",
+                "Range": f"bytes={start + have}-{end}",
+            }
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                if int(getattr(resp, "status", 206) or 206) >= 400:
+                    raise RuntimeError(f"HTTP {resp.status}")
+                mode = "ab" if have else "wb"
+                wrote = 0
+                with open(part, mode) as f:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        wrote += len(chunk)
+                        with lock:
+                            got[int(part.stem)] = have + wrote
+                            report()
 
         def worker(idx, start, end):
             part = part_dir / f"{idx:02d}.bin"
@@ -391,27 +454,11 @@ class SetupApp:
             rotated = urls[idx % len(urls):] + urls[: idx % len(urls)]
             for url in rotated:
                 try:
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 NoVoice-setup",
-                        "Range": f"bytes={start + have}-{end}",
-                    }
-                    req = urllib.request.Request(url, headers=headers)
-                    with urllib.request.urlopen(req, timeout=20) as resp:
-                        if int(getattr(resp, "status", 206) or 206) >= 400:
-                            raise RuntimeError(f"HTTP {resp.status}")
-                        mode = "ab" if have else "wb"
-                        wrote = 0
-                        with open(part, mode) as f:
-                            while True:
-                                chunk = resp.read(1024 * 512)
-                                if not chunk:
-                                    break
-                                f.write(chunk)
-                                wrote += len(chunk)
-                                with lock:
-                                    got[idx] = have + wrote
-                                    report()
-                    final = part.stat().st_size
+                    if curl:
+                        curl_range(url, start, end, part, have)
+                    else:
+                        py_range(url, start, end, part, have)
+                    final = part.stat().st_size if part.exists() else 0
                     if final != need:
                         raise RuntimeError(f"分段 {idx} 不完整 {final}/{need}")
                     with lock:
