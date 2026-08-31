@@ -32,14 +32,21 @@ MODEL_MIRRORS = [
     "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/Demucs/Demucs_v4/{name}",
     "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/{name}",
 ]
-MODEL_FILES = [
+MODEL_FILES_STD = [
     "htdemucs.yaml",
-    "htdemucs_ft.yaml",
     "955717e8-8726e21a.th",
+]
+MODEL_FILES_FT = [
+    "htdemucs_ft.yaml",
     "04573f0d-f3cf25b2.th",
     "92cfc3b6-ef3bcb9c.th",
     "d12395a8-e57c48e6.th",
     "f7e0c4bc-ba3fe64a.th",
+]
+MODEL_FILES = MODEL_FILES_STD + MODEL_FILES_FT
+LOCAL_MODEL_HINTS = [
+    Path(r"D:\NoVoice\models"),
+    Path.home() / ".cache" / "torch" / "hub" / "checkpoints",
 ]
 PIPI = "https://pypi.tuna.tsinghua.edu.cn/simple"
 TORCH_GPU = [
@@ -483,12 +490,30 @@ class SetupApp:
             self.run_cmd([str(VPY), "-m", "pip", "install", "demucs", "soundfile"], progress_base=50)
         self.set_progress(58)
 
+    def _wanted_models(self):
+        wanted = list(MODEL_FILES_STD)
+        if os.environ.get("NOVOICE_MODELS", "std").lower() in ("all", "ft", "full"):
+            wanted.extend(MODEL_FILES_FT)
+        return wanted
+
+    def _reuse_local_model(self, name):
+        dest = MODELS / name
+        if dest.exists() and dest.stat().st_size > 10:
+            return True
+        for hint in LOCAL_MODEL_HINTS:
+            src = hint / name
+            if src.exists() and src.stat().st_size > 10:
+                dest.write_bytes(src.read_bytes())
+                self.append(f"复用本地模型 {src}")
+                return True
+        return dest.exists()
+
     def ensure_models(self):
-        self.set_progress(60, "下载模型", "正在检查模型文件…", step=2, crawl=True)
+        self.set_progress(60, "下载模型", "正在检查标准模型…", step=2, crawl=True)
         MODELS.mkdir(parents=True, exist_ok=True)
-        missing = [f for f in MODEL_FILES if not (MODELS / f).exists()]
+        missing = [f for f in self._wanted_models() if not self._reuse_local_model(f)]
         if not missing:
-            self.append("模型已齐全")
+            self.append("标准模型已就绪")
             self.set_progress(86)
             return
         total = len(missing)
