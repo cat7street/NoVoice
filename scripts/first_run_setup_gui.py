@@ -230,6 +230,16 @@ class SetupApp:
             self.log.configure(state="disabled")
         self.root.after(0, _)
 
+    def _hidden(self):
+        kw = {}
+        if os.name == "nt":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0
+            kw["startupinfo"] = si
+            kw["creationflags"] = 0x08000000
+        return kw
+
     def which(self, name):
         from shutil import which
         return which(name)
@@ -237,16 +247,22 @@ class SetupApp:
     def pick_python(self):
         for ver in ("3.12", "3.11", "3.10"):
             try:
-                r = subprocess.run(["py", f"-{ver}", "-V"], capture_output=True, text=True)
-                if r.returncode == 0:
-                    return ["py", f"-{ver}"]
+                r = subprocess.run(
+                    ["py", f"-{ver}", "-c", "import sys; print(sys.executable)"],
+                    capture_output=True, text=True, **self._hidden(),
+                )
+                exe = (r.stdout or "").strip()
+                if r.returncode == 0 and exe:
+                    return [exe]
             except Exception:
                 pass
         return ["python"]
 
     def py_tag(self):
-        r = subprocess.run([str(VPY), "-c", "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"],
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            [str(VPY), "-c", "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"],
+            capture_output=True, text=True, **self._hidden(),
+        )
         tag = (r.stdout or "").strip()
         return tag or "cp312"
 
@@ -329,7 +345,15 @@ class SetupApp:
         if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "pip" and "--progress-bar" not in cmd:
             cmd.extend(["--progress-bar", "on"])
         self.append("> " + " ".join(map(str, cmd)))
-        p = subprocess.Popen(cmd, cwd=str(ROOT), env=merged, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+        p = subprocess.Popen(
+            cmd,
+            cwd=str(ROOT),
+            env=merged,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+            **self._hidden(),
+        )
         assert p.stdout is not None
         buf = b""
         while True:
@@ -385,13 +409,13 @@ class SetupApp:
 
     def ensure_deps(self):
         self.set_progress(18, "安装依赖", "正在检查 PyTorch 与 Demucs…", step=1, crawl=True)
-        check = subprocess.run([str(VPY), "-c", "import demucs"], cwd=str(ROOT), capture_output=True)
+        check = subprocess.run([str(VPY), "-c", "import demucs"], cwd=str(ROOT), capture_output=True, **self._hidden())
         if check.returncode == 0:
             self.append("demucs 已安装")
             self.set_progress(58)
             return
-        has_nvidia = subprocess.run(["nvidia-smi"], capture_output=True).returncode == 0
-        torch_ok = subprocess.run([str(VPY), "-c", "import torch"], cwd=str(ROOT), capture_output=True).returncode == 0
+        has_nvidia = subprocess.run(["nvidia-smi"], capture_output=True, **self._hidden()).returncode == 0
+        torch_ok = subprocess.run([str(VPY), "-c", "import torch"], cwd=str(ROOT), capture_output=True, **self._hidden()).returncode == 0
         if not torch_ok:
             if has_nvidia:
                 self.append("检测到 NVIDIA，下载 GPU 版 PyTorch")
@@ -459,7 +483,7 @@ class SetupApp:
             MARKER.write_text("ready\n", encoding="utf-8")
             self.set_progress(100, "配置完成", "即将启动 NoVoice…", step=4)
             if EXE.exists():
-                subprocess.Popen([str(EXE)], cwd=str(ROOT))
+                subprocess.Popen([str(EXE)], cwd=str(ROOT), **self._hidden())
                 self.root.after(700, self.root.destroy)
             else:
                 self.root.after(0, lambda: messagebox.showerror("错误", "未找到 NoVoice.exe"))
@@ -477,6 +501,13 @@ class SetupApp:
 
 if __name__ == "__main__":
     if MARKER.exists() and EXE.exists():
-        subprocess.Popen([str(EXE)], cwd=str(ROOT))
+        kw = {}
+        if os.name == "nt":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0
+            kw["startupinfo"] = si
+            kw["creationflags"] = 0x08000000
+        subprocess.Popen([str(EXE)], cwd=str(ROOT), **kw)
         sys.exit(0)
     SetupApp().run()
