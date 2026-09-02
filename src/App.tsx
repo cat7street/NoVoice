@@ -317,7 +317,7 @@ export default function App() {
           <div className="panel-head"><strong>控制</strong></div>
 
           <div className="field">
-            <span className="label">分离质量</span>
+            <span className="label">人声估计</span>
             <div className="seg">
               {MODEL_OPTIONS.map((o) => (
                 <button key={o.value} className={model === o.value ? "on" : ""} disabled={running} onClick={() => setModel(o.value)}>
@@ -325,6 +325,7 @@ export default function App() {
                 </button>
               ))}
             </div>
+            <span className="hint">原轨减人声；枪声、脚步、环绕不重建</span>
           </div>
 
           <div className="field">
@@ -424,7 +425,7 @@ export default function App() {
               </button>
             </div>
             <div className="modal-body">
-              <p>视频去人声工具：画面零重编码，仅处理音轨，支持拖放批量处理与内置播放。</p>
+              <p>视频去人声：画面零重编码。人声从原轨里减掉，枪声、脚步、环境声和环绕声道尽量原样保留。</p>
               <p><strong>作者：</strong>cat7street</p>
               <p>
                 <strong>开源地址：</strong>

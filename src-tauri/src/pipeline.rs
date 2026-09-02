@@ -133,6 +133,176 @@ fn audio_codec_for(suffix: &str, bitrate: &str) -> (&'static str, String) {
     }
 }
 
+fn stream_i64(stream: &Value, key: &str, default: i64) -> i64 {
+    stream
+        .get(key)
+        .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|x| x as i64)).or_else(|| {
+            v.as_str().and_then(|s| s.parse::<i64>().ok())
+        }))
+        .unwrap_or(default)
+}
+
+fn stream_channels(stream: &Value) -> i64 {
+    stream_i64(stream, "channels", 2).clamp(1, 16)
+}
+
+fn stream_sample_rate(stream: &Value) -> u32 {
+    stream_i64(stream, "sample_rate", SAMPLE_RATE as i64).clamp(8000, 192000) as u32
+}
+
+fn channel_layout_of(stream: &Value, channels: i64) -> String {
+    if let Some(layout) = stream
+        .get("channel_layout")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty() && *s != "unknown")
+    {
+        return layout.to_string();
+    }
+    match channels {
+        1 => "mono".into(),
+        2 => "stereo".into(),
+        3 => "2.1".into(),
+        4 => "quad".into(),
+        5 => "5.0".into(),
+        6 => "5.1".into(),
+        7 => "6.1".into(),
+        8 => "7.1".into(),
+        n => format!("{n}c"),
+    }
+}
+
+fn extract_front_pan(channels: i64) -> String {
+    match channels {
+        1 => "pan=stereo|c0=c0|c1=c0".into(),
+        _ => "pan=stereo|c0=c0|c1=c1".into(),
+    }
+}
+
+fn extract_center_pan() -> &'static str {
+    "pan=stereo|c0=c2|c1=c2"
+}
+
+fn has_center_channel(channels: i64) -> bool {
+    channels >= 5
+}
+
+fn pan_layout_name(layout: &str, channels: i64) -> String {
+    if layout.chars().any(|c| !c.is_ascii_alphanumeric() && c != '.' && c != '_') {
+        format!("{channels}c")
+    } else {
+        layout.to_string()
+    }
+}
+
+fn vocals_map_front(channels: i64, layout: &str) -> String {
+    let layout = pan_layout_name(layout, channels);
+    match channels {
+        1 => format!("pan={layout}|c0=0.5*c0+0.5*c1"),
+        2 => format!("pan={layout}|c0=c0|c1=c1"),
+        n => {
+            let mut assigns = vec!["c0=c0".to_string(), "c1=c1".to_string()];
+            for i in 2..n {
+                assigns.push(format!("c{i}=0*c0"));
+            }
+            format!("pan={layout}|{}", assigns.join("|"))
+        }
+    }
+}
+
+fn vocals_map_center(channels: i64, layout: &str) -> String {
+    let layout = pan_layout_name(layout, channels);
+    let mut assigns = Vec::new();
+    for i in 0..channels {
+        if i == 2 {
+            assigns.push("c2=0.5*c0+0.5*c1".to_string());
+        } else {
+            assigns.push(format!("c{i}=0*c0"));
+        }
+    }
+    format!("pan={layout}|{}", assigns.join("|"))
+}
+
+fn keep_layout_name(layout: &str) -> bool {
+    !layout.ends_with('c')
+        && layout
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+}
+
+fn subtract_mapped_vocals(
+    ffmpeg: &Path,
+    original: &Path,
+    original_is_wav: bool,
+    stream_index: i64,
+    vocals: &Path,
+    out_wav: &Path,
+    channels: i64,
+    sample_rate: u32,
+    layout: &str,
+    map_v: &str,
+) -> Result<(), PipelineError> {
+    let orig_label = if original_is_wav {
+        "0:a:0".to_string()
+    } else {
+        format!("0:{stream_index}")
+    };
+    let graphs = [
+        format!(
+            "[1:a]aresample={sample_rate}:resampler=soxr:precision=28,{map_v}[v];[{orig_label}][v]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights=1 -1[a]"
+        ),
+        format!(
+            "[1:a]aresample={sample_rate},{map_v}[v];[{orig_label}][v]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights=1 -1[a]"
+        ),
+    ];
+    let mut last_err = None;
+    let keep_layout = keep_layout_name(layout);
+    for graph in &graphs {
+        let mut cmd = Command::new(ffmpeg);
+        cmd.args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(original)
+            .arg("-i")
+            .arg(vocals)
+            .args([
+                "-filter_complex",
+                graph,
+                "-map",
+                "[a]",
+                "-c:a",
+                "pcm_f32le",
+                "-ar",
+                &sample_rate.to_string(),
+                "-ac",
+                &channels.to_string(),
+            ]);
+        if keep_layout {
+            cmd.args(["-channel_layout", layout]);
+        }
+        match run_checked(cmd.arg(out_wav)) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| PipelineError::Message("原轨减人声失败".into())))
+}
+
+fn encode_bitrate(channels: i64, requested: &str) -> String {
+    if requested != "320k" && !requested.is_empty() {
+        return requested.to_string();
+    }
+    match channels {
+        n if n >= 8 => "768k".into(),
+        n if n >= 6 => "640k".into(),
+        n if n >= 3 => "384k".into(),
+        _ => {
+            if requested.is_empty() {
+                "320k".into()
+            } else {
+                requested.to_string()
+            }
+        }
+    }
+}
+
 fn has_nvidia() -> bool {
     which("nvidia-smi")
         .ok()
@@ -220,7 +390,7 @@ fn run_demucs(
     };
     let mut segment: Option<f64> = None;
     let mut last_err = String::new();
-    let pct_re = Regex::new(r"(d{1,3})%").unwrap();
+    let pct_re = Regex::new(r"(\d{1,3})%").unwrap();
 
     for attempt in 0..3 {
         ensure_not_cancelled(cancel)?;
@@ -229,6 +399,11 @@ fn run_demucs(
             "demucs.separate".into(),
             "--two-stems".into(),
             "vocals".into(),
+            "--other-method".into(),
+            "none".into(),
+            "--clip-mode".into(),
+            "none".into(),
+            "--float32".into(),
             "-n".into(),
             opts.model.clone(),
             "-o".into(),
@@ -303,12 +478,12 @@ fn run_demucs(
         if cancelled || cancel.load(Ordering::SeqCst) {
             return Err(PipelineError::Cancelled);
         }
-        let no_voc = out_dir
+        let vocals = out_dir
             .join(&opts.model)
             .join(wav.file_stem().unwrap_or_default())
-            .join("no_vocals.wav");
-        if status.success() && no_voc.exists() {
-            return Ok(no_voc);
+            .join("vocals.wav");
+        if status.success() && vocals.exists() {
+            return Ok(vocals);
         }
         last_err = tail.chars().rev().take(800).collect::<String>().chars().rev().collect();
         let combined = last_err.to_ascii_lowercase();
@@ -437,33 +612,35 @@ pub fn remove_vocals(
                 .get("index")
                 .and_then(|v| v.as_i64())
                 .ok_or_else(|| PipelineError::Message("音轨缺少 index".into()))?;
-            let wav = td.join(format!("track{k}.wav"));
+            let channels = stream_channels(stream);
+            let sample_rate = stream_sample_rate(stream);
+            let layout = channel_layout_of(stream, channels);
+            let wav = td.join(format!("track{k}_front.wav"));
             run_checked(
                 Command::new(&ffmpeg)
-                    .args([
-                        "-y",
-                        "-hide_banner",
-                        "-loglevel",
-                        "error",
-                        "-i",
-                    ])
+                    .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
                     .arg(&input_path)
                     .args([
                         "-map",
                         &format!("0:{idx}"),
                         "-vn",
+                        "-af",
+                        &extract_front_pan(channels),
                         "-c:a",
                         "pcm_f32le",
                         "-ar",
                         &SAMPLE_RATE.to_string(),
-                        "-ac",
-                        "2",
                     ])
                     .arg(&wav),
             )?;
             let sep_dir = td.join(format!("sep{k}"));
             fs::create_dir_all(&sep_dir)?;
-            sep_wavs.push(run_demucs(
+            let front_span = if has_center_channel(channels) {
+                span * 0.45
+            } else {
+                span * 0.9
+            };
+            let front_vocals = run_demucs(
                 &python,
                 &wav,
                 &sep_dir,
@@ -471,10 +648,81 @@ pub fn remove_vocals(
                 &model_repo,
                 &label,
                 base,
-                span,
+                front_span,
                 &cancel,
                 &mut progress,
-            )?);
+            )?;
+            if !progress(ProgressEvent {
+                stage: "restore".into(),
+                progress: base + front_span,
+                message: format!("{label} 原轨减人声，保留其他声道..."),
+                file: Some(input_path.display().to_string()),
+            }) {
+                return Err(PipelineError::Cancelled);
+            }
+            let restored = td.join(format!("restored{k}.wav"));
+            subtract_mapped_vocals(
+                &ffmpeg,
+                &input_path,
+                false,
+                idx,
+                &front_vocals,
+                &restored,
+                channels,
+                sample_rate,
+                &layout,
+                &vocals_map_front(channels, &layout),
+            )?;
+            if has_center_channel(channels) {
+                let center_wav = td.join(format!("track{k}_center.wav"));
+                run_checked(
+                    Command::new(&ffmpeg)
+                        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+                        .arg(&input_path)
+                        .args([
+                            "-map",
+                            &format!("0:{idx}"),
+                            "-vn",
+                            "-af",
+                            extract_center_pan(),
+                            "-c:a",
+                            "pcm_f32le",
+                            "-ar",
+                            &SAMPLE_RATE.to_string(),
+                        ])
+                        .arg(&center_wav),
+                )?;
+                let center_dir = td.join(format!("sep{k}_c"));
+                fs::create_dir_all(&center_dir)?;
+                let center_vocals = run_demucs(
+                    &python,
+                    &center_wav,
+                    &center_dir,
+                    &opts,
+                    &model_repo,
+                    &format!("{label} 中置"),
+                    base + front_span,
+                    span * 0.45,
+                    &cancel,
+                    &mut progress,
+                )?;
+                let restored2 = td.join(format!("restored{k}_c.wav"));
+                subtract_mapped_vocals(
+                    &ffmpeg,
+                    &restored,
+                    true,
+                    0,
+                    &center_vocals,
+                    &restored2,
+                    channels,
+                    sample_rate,
+                    &layout,
+                    &vocals_map_center(channels, &layout),
+                )?;
+                sep_wavs.push(restored2);
+            } else {
+                sep_wavs.push(restored);
+            }
         }
 
         if !progress(ProgressEvent {
@@ -530,14 +778,25 @@ pub fn remove_vocals(
             args.extend(["-map".into(), "0:d?".into()]);
         }
 
-        let (acodec, abr) = audio_codec_for(&suffix, &opts.bitrate);
+        let (acodec, _) = audio_codec_for(&suffix, &opts.bitrate);
         for (m, stream) in audio_streams.iter().enumerate() {
             let idx = stream.get("index").and_then(|v| v.as_i64()).unwrap_or(-1);
             if sel_idx.contains(&idx) {
+                let ch = stream_channels(stream);
+                let abr = encode_bitrate(ch, &opts.bitrate);
+                let layout = channel_layout_of(stream, ch);
                 args.push(format!("-c:a:{m}"));
                 args.push(acodec.into());
                 args.push(format!("-b:a:{m}"));
-                args.push(abr.clone());
+                args.push(abr);
+                args.push(format!("-ac:a:{m}"));
+                args.push(ch.to_string());
+                args.push(format!("-ar:a:{m}"));
+                args.push(stream_sample_rate(stream).to_string());
+                if !layout.ends_with('c') {
+                    args.push(format!("-channel_layout:a:{m}"));
+                    args.push(layout);
+                }
             } else {
                 args.push(format!("-c:a:{m}"));
                 args.push("copy".into());

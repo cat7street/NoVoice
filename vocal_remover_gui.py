@@ -158,7 +158,7 @@ def hook_dropfiles(widget: tk.Misc, callback) -> object | None:
 
 MODEL_MAP = {
     "标准（速度快）": "htdemucs",
-    "高质量（更慢更干净）": "htdemucs_ft",
+    "高质量（更慢，人声估计更准）": "htdemucs_ft",
 }
 TRACK_MAP = {
     "全部音轨都去人声": "all",
@@ -231,7 +231,7 @@ class App:
                            values=list(TRACK_MAP), width=26)
         cb2.grid(row=0, column=3, padx=4)
         ttk.Label(opts, foreground="#666",
-                  text="画面、字幕、章节、元数据均原样保留（零重编码）；仅音轨经 AI 去人声。"
+                  text="画面零重编码。人声从原轨减去；环绕/LFE 与枪声脚步不进模型。"
         ).grid(row=1, column=0, columnspan=4, padx=10, pady=(0, 8), sticky="w")
 
         run = ttk.Frame(self.root)

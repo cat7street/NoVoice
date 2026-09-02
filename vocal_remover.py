@@ -3,12 +3,12 @@
 
 处理流程:
 1. ffprobe 读取视频信息（视频流 / 音轨 / 字幕 / 章节 / 元数据）
-2. ffmpeg 从视频中无损提取音轨，转成 44.1kHz 立体声 wav
-3. Demucs AI 模型把音轨分离成「人声」和「无人声伴奏」两部分
+2. ffmpeg 只从前置/中置声道抽出人声估计用的立体声（环绕与 LFE 不进模型）
+3. Demucs 只估计人声；输出 = 原音轨 − 人声估计（枪声、脚步、环境声留在原轨）
 4. ffmpeg 重新封装: 视频流直接流复制(-c:v copy, 零重编码, 逐位不变),
-   字幕/章节/元数据原样保留, 仅音轨换成去人声后的版本
+   字幕/章节/元数据原样保留, 仅音轨换成减过人声的版本
 
-因此视频画面、字幕、章节、元数据完全不受影响。
+因此视频画面、字幕、章节、元数据完全不受影响；多声道布局与采样率保持原样。
 """
 from __future__ import annotations
 
@@ -108,6 +108,125 @@ def _audio_codec_for(suffix: str, bitrate: str) -> tuple:
     return "aac", bitrate or "320k"
 
 
+def _stream_int(stream: dict, key: str, default: int) -> int:
+    raw = stream.get(key, default)
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def _stream_channels(stream: dict) -> int:
+    return max(1, min(_stream_int(stream, "channels", 2), 16))
+
+
+def _stream_sample_rate(stream: dict) -> int:
+    return max(8000, min(_stream_int(stream, "sample_rate", SAMPLE_RATE), 192000))
+
+
+def _channel_layout(stream: dict, channels: int) -> str:
+    layout = (stream.get("channel_layout") or "").strip()
+    if layout and layout != "unknown":
+        return layout
+    return {
+        1: "mono",
+        2: "stereo",
+        3: "2.1",
+        4: "quad",
+        5: "5.0",
+        6: "5.1",
+        7: "6.1",
+        8: "7.1",
+    }.get(channels, f"{channels}c")
+
+
+def _extract_front_pan(channels: int) -> str:
+    if channels <= 1:
+        return "pan=stereo|c0=c0|c1=c0"
+    return "pan=stereo|c0=c0|c1=c1"
+
+
+def _extract_center_pan() -> str:
+    return "pan=stereo|c0=c2|c1=c2"
+
+
+def _has_center_channel(channels: int) -> bool:
+    return channels >= 5
+
+
+def _pan_layout_name(layout: str, channels: int) -> str:
+    if any(not (c.isalnum() or c in "._") for c in layout):
+        return f"{channels}c"
+    return layout
+
+
+def _vocals_map_front(channels: int, layout: str) -> str:
+    layout = _pan_layout_name(layout, channels)
+    if channels == 1:
+        return f"pan={layout}|c0=0.5*c0+0.5*c1"
+    if channels == 2:
+        return f"pan={layout}|c0=c0|c1=c1"
+    assigns = ["c0=c0", "c1=c1"]
+    assigns.extend(f"c{i}=0*c0" for i in range(2, channels))
+    return f"pan={layout}|" + "|".join(assigns)
+
+
+def _vocals_map_center(channels: int, layout: str) -> str:
+    layout = _pan_layout_name(layout, channels)
+    assigns = []
+    for i in range(channels):
+        if i == 2:
+            assigns.append("c2=0.5*c0+0.5*c1")
+        else:
+            assigns.append(f"c{i}=0*c0")
+    return f"pan={layout}|" + "|".join(assigns)
+
+
+def _encode_bitrate(channels: int, requested: str) -> str:
+    if requested and requested != "320k":
+        return requested
+    if channels >= 8:
+        return "768k"
+    if channels >= 6:
+        return "640k"
+    if channels >= 3:
+        return "384k"
+    return requested or "320k"
+
+
+def _subtract_mapped_vocals(ffmpeg: str, original: Path, original_is_wav: bool,
+                            stream_index: int, vocals: Path, out_wav: Path,
+                            channels: int, sample_rate: int, layout: str,
+                            map_v: str) -> None:
+    orig = "0:a:0" if original_is_wav else f"0:{stream_index}"
+    graphs = [
+        f"[1:a]aresample={sample_rate}:resampler=soxr:precision=28,{map_v}[v];"
+        f"[{orig}][v]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights=1 -1[a]",
+        f"[1:a]aresample={sample_rate},{map_v}[v];"
+        f"[{orig}][v]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights=1 -1[a]",
+    ]
+    keep_layout = (not layout.endswith("c")
+                   and all(c.isalnum() or c in "._" for c in layout))
+    last = None
+    for graph in graphs:
+        cmd = [
+            ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(original), "-i", str(vocals),
+            "-filter_complex", graph, "-map", "[a]",
+            "-c:a", "pcm_f32le", "-ar", str(sample_rate),
+            "-ac", str(channels),
+        ]
+        if keep_layout:
+            cmd += ["-channel_layout", layout]
+        cmd.append(str(out_wav))
+        try:
+            _run(cmd)
+            return
+        except VocalRemoverError as e:
+            last = e
+    raise last or VocalRemoverError("原轨减人声失败")
+
+
 _PCT = re.compile(r"(\d{1,3})%")
 
 _NVIDIA: Optional[bool] = None
@@ -131,11 +250,14 @@ def _has_nvidia() -> bool:
 
 def _run_demucs(wav: Path, out_dir: Path, opts: Options,
                 cb: ProgressCB, label: str, base: float, span: float) -> Path:
-    """调用 Demucs 分离人声，返回 no_vocals.wav 的路径。"""
+    """调用 Demucs 估计人声，返回 vocals.wav 的路径。"""
     def build_args(segment: Optional[float], device: str):
         args = [
             sys.executable, "-m", "demucs.separate",
             "--two-stems", "vocals",
+            "--other-method", "none",
+            "--clip-mode", "none",
+            "--float32",
             "-n", opts.model,
             "-o", str(out_dir),
             "-d", device,
@@ -183,9 +305,9 @@ def _run_demucs(wav: Path, out_dir: Path, opts: Options,
         proc.wait()
         if cancelled:
             raise CancelledError()
-        no_voc = out_dir / opts.model / wav.stem / "no_vocals.wav"
-        if proc.returncode == 0 and no_voc.exists():
-            return no_voc
+        vocals = out_dir / opts.model / wav.stem / "vocals.wav"
+        if proc.returncode == 0 and vocals.exists():
+            return vocals
         last_err = (tail or "")[-800:]
         combined = last_err.lower()
         if "out of memory" in combined and device == "cuda" and attempt == 0:
@@ -241,16 +363,52 @@ def remove_vocals(input_path, output_path=None,
             label = f"[音轨{k + 1}/{total}]"
             if not cb("extract", base, f"{label} 提取音频..."):
                 raise CancelledError()
-            wav = tdp / f"track{k}.wav"
+            channels = _stream_channels(s)
+            sample_rate = _stream_sample_rate(s)
+            layout = _channel_layout(s, channels)
+            wav = tdp / f"track{k}_front.wav"
             _run([
                 ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                 "-i", str(input_path),
                 "-map", f"0:{s['index']}", "-vn",
-                "-c:a", "pcm_f32le", "-ar", str(SAMPLE_RATE), "-ac", "2",
+                "-af", _extract_front_pan(channels),
+                "-c:a", "pcm_f32le", "-ar", str(SAMPLE_RATE),
                 str(wav),
             ])
-            sep_wavs.append(_run_demucs(wav, tdp / f"sep{k}", opts, cb,
-                                        label, base, span))
+            front_span = span * 0.45 if _has_center_channel(channels) else span * 0.9
+            front_vocals = _run_demucs(wav, tdp / f"sep{k}", opts, cb,
+                                       label, base, front_span)
+            if not cb("restore", base + front_span,
+                      f"{label} 原轨减人声，保留其他声道..."):
+                raise CancelledError()
+            restored = tdp / f"restored{k}.wav"
+            _subtract_mapped_vocals(
+                ffmpeg, input_path, False, s["index"], front_vocals, restored,
+                channels, sample_rate, layout, _vocals_map_front(channels, layout),
+            )
+            if _has_center_channel(channels):
+                center_wav = tdp / f"track{k}_center.wav"
+                _run([
+                    ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                    "-i", str(input_path),
+                    "-map", f"0:{s['index']}", "-vn",
+                    "-af", _extract_center_pan(),
+                    "-c:a", "pcm_f32le", "-ar", str(SAMPLE_RATE),
+                    str(center_wav),
+                ])
+                center_vocals = _run_demucs(
+                    center_wav, tdp / f"sep{k}_c", opts, cb,
+                    f"{label} 中置", base + front_span, span * 0.45,
+                )
+                restored2 = tdp / f"restored{k}_c.wav"
+                _subtract_mapped_vocals(
+                    ffmpeg, restored, True, 0, center_vocals, restored2,
+                    channels, sample_rate, layout,
+                    _vocals_map_center(channels, layout),
+                )
+                sep_wavs.append(restored2)
+            else:
+                sep_wavs.append(restored)
 
         if not cb("mux", 0.98, "合成视频（画面直接复制，零重编码）..."):
             raise CancelledError()
@@ -279,10 +437,17 @@ def remove_vocals(input_path, output_path=None,
         if output_path.suffix.lower() not in (".mp4", ".m4v", ".mov", ".3gp"):
             args += ["-map", "0:d?"]
 
-        acodec, abr = _audio_codec_for(output_path.suffix, opts.bitrate)
+        acodec, _ = _audio_codec_for(output_path.suffix, opts.bitrate)
         for m, s in enumerate(audio_streams):
             if s["index"] in sel_idx:
-                args += [f"-c:a:{m}", acodec, f"-b:a:{m}", abr]
+                ch = _stream_channels(s)
+                abr = _encode_bitrate(ch, opts.bitrate)
+                layout = _channel_layout(s, ch)
+                args += [f"-c:a:{m}", acodec, f"-b:a:{m}", abr,
+                         f"-ac:a:{m}", str(ch),
+                         f"-ar:a:{m}", str(_stream_sample_rate(s))]
+                if not layout.endswith("c"):
+                    args += [f"-channel_layout:a:{m}", layout]
             else:
                 args += [f"-c:a:{m}", "copy"]
             lang = (s.get("tags") or {}).get("language")

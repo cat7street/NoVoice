@@ -4,7 +4,8 @@
 开源地址：https://github.com/cat7street/NoVoice
 
 去掉视频里的人声（对白 / 演唱），**画面、字幕、章节、元数据不受影响**。  
-桌面端基于 **Tauri 2 + React + Rust**，分离引擎复用 Demucs。
+枪声、脚步、环境音和环绕声道尽量从原轨保留，而不是用 AI 重建伴奏。  
+桌面端基于 **Tauri 2 + React + Rust**，人声估计复用 Demucs。
 
 ## 给别人用（推荐）
 
