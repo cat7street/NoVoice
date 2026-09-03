@@ -326,7 +326,6 @@ export default function App() {
                 </button>
               ))}
             </div>
-            <span className="hint">标准快；高质量更干净；超高质量叠标准补游戏短喊</span>
           </div>
 
           <div className="field">
