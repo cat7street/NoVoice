@@ -39,6 +39,7 @@ const VIDEO_EXTS = [
 const MODEL_OPTIONS = [
   { label: "标准", value: "htdemucs" },
   { label: "高质量", value: "htdemucs_ft" },
+  { label: "超高质量", value: "htdemucs_union" },
 ];
 
 const TRACK_OPTIONS = [
@@ -325,7 +326,7 @@ export default function App() {
                 </button>
               ))}
             </div>
-            <span className="hint">原轨减人声。高质量会叠标准模型，补游戏短喊</span>
+            <span className="hint">标准快；高质量更干净；超高质量叠标准补游戏短喊</span>
           </div>
 
           <div className="field">

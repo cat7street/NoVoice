@@ -53,7 +53,7 @@ class CancelledError(VocalRemoverError):
 
 @dataclass
 class Options:
-    model: str = "htdemucs"   # 分离模型: htdemucs=标准(快) / htdemucs_ft=高质量(慢)
+    model: str = "htdemucs"   # htdemucs=标准 / htdemucs_ft=高质量 / htdemucs_union=超高质量
     bitrate: str = "320k"     # 输出音轨码率
     device: str = "auto"      # auto / cpu / cuda
     tracks: str = "all"       # all=处理全部音轨 / first=仅处理第一条, 其余原样保留
@@ -362,8 +362,15 @@ def _union_vocals_then_subtract(ffmpeg: str, original: Path, voc_a: Path,
 def _run_demucs_for_track(wav: Path, out_dir: Path, opts: Options,
                           cb: ProgressCB, label: str, base: float, span: float,
                           ffmpeg: str) -> Path:
-    if opts.model != "htdemucs_ft":
-        vocals = _run_demucs(wav, out_dir, opts, cb, label, base, span)
+    union = opts.model in ("htdemucs_union", "ultra")
+    if not union:
+        single = Options(
+            model="htdemucs_ft" if opts.model in ("htdemucs_ft", "hq") else "htdemucs",
+            bitrate=opts.bitrate,
+            device=opts.device,
+            tracks=opts.tracks,
+        )
+        vocals = _run_demucs(wav, out_dir, single, cb, label, base, span)
         return _subtract_vocals(ffmpeg, wav, vocals, out_dir / "minus_vocals.wav")
     std_span = span * 0.42
     ft_span = span - std_span
@@ -377,9 +384,15 @@ def _run_demucs_for_track(wav: Path, out_dir: Path, opts: Options,
         wav, out_dir / "std", std_opts, cb,
         f"{label} 标准", base, std_span,
     )
-    if not cb("union", base + std_span, f"{label} 高质量补漏..."):
+    if not cb("union", base + std_span, f"{label} 超高质量补漏..."):
         raise CancelledError()
-    voc_ft = _run_demucs(wav, out_dir, opts, cb, label, base + std_span, ft_span * 0.95)
+    ft_opts = Options(
+        model="htdemucs_ft",
+        bitrate=opts.bitrate,
+        device=opts.device,
+        tracks=opts.tracks,
+    )
+    voc_ft = _run_demucs(wav, out_dir, ft_opts, cb, label, base + std_span, ft_span * 0.95)
     return _union_vocals_then_subtract(
         ffmpeg, wav, voc_std, voc_ft, out_dir / "union_minus.wav",
     )
@@ -554,8 +567,8 @@ def main(argv=None) -> int:
     ap.add_argument("inputs", nargs="+", help="输入视频文件（可多个）")
     ap.add_argument("-o", "--output", help="输出文件路径（仅单个输入时可指定）")
     ap.add_argument("-m", "--model", default="htdemucs",
-                    choices=["htdemucs", "htdemucs_ft"],
-                    help="分离模型: htdemucs=标准(默认), htdemucs_ft=高质量(慢约4倍)")
+                    choices=["htdemucs", "htdemucs_ft", "htdemucs_union"],
+                    help="htdemucs=标准(默认), htdemucs_ft=高质量, htdemucs_union=超高质量(叠标准补短喊)")
     ap.add_argument("-t", "--tracks", default="all", choices=["all", "first"],
                     help="all=处理全部音轨(默认), first=仅处理第一条、其余原样保留")
     ap.add_argument("--bitrate", default="320k", help="输出音轨码率(默认 320k)")

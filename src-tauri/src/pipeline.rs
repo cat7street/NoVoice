@@ -613,15 +613,21 @@ fn run_demucs_for_track(
     progress: &mut ProgressCb,
     ffmpeg: &Path,
 ) -> Result<PathBuf, PipelineError> {
-    if opts.model != "htdemucs_ft" {
+    let union = opts.model == "htdemucs_union" || opts.model == "ultra";
+    if !union {
+        let mut single = opts.clone();
+        if single.model == "htdemucs_ft" || single.model == "hq" {
+            single.model = "htdemucs_ft".into();
+        } else {
+            single.model = "htdemucs".into();
+        }
         let vocals = run_demucs(
-            python, wav, out_dir, opts, model_repo, label, base, span, cancel, progress,
+            python, wav, out_dir, &single, model_repo, label, base, span, cancel, progress,
         )?;
         let minus = out_dir.join("minus_vocals.wav");
         return subtract_vocals_from_original(ffmpeg, wav, &vocals, &minus);
     }
-    // 游戏短喊：htdemucs 比 htdemucs_ft 抠得更干净。高质量仍跑 FT，但输出以标准模型为准，
-    // 只在标准漏掉、FT 更狠的样本上才用 FT（按样本取去人声更多的那路）。
+    // 超高质量：先标准再 FT，短喊跟标准，对白取两路里去得更干净的。
     let std_span = span * 0.42;
     let ft_span = span - std_span;
     let mut std_opts = opts.clone();
@@ -643,13 +649,15 @@ fn run_demucs_for_track(
     if !progress(ProgressEvent {
         stage: "union".into(),
         progress: base + std_span,
-        message: format!("{label} 高质量补漏..."),
+        message: format!("{label} 超高质量补漏..."),
         file: Some(wav.display().to_string()),
     }) {
         return Err(PipelineError::Cancelled);
     }
+    let mut ft_opts = opts.clone();
+    ft_opts.model = "htdemucs_ft".into();
     let voc_ft = run_demucs(
-        python, wav, out_dir, opts, model_repo, label, base + std_span, ft_span * 0.95, cancel, progress,
+        python, wav, out_dir, &ft_opts, model_repo, label, base + std_span, ft_span * 0.95, cancel, progress,
     )?;
     let union = out_dir.join("union_minus.wav");
     union_vocals_then_subtract(ffmpeg, wav, &voc_std, &voc_ft, &union)
