@@ -160,28 +160,6 @@ def _pan_layout_name(layout: str, channels: int) -> str:
     return layout
 
 
-def _vocals_map_front(channels: int, layout: str) -> str:
-    layout = _pan_layout_name(layout, channels)
-    if channels == 1:
-        return f"pan={layout}|c0=0.5*c0+0.5*c1"
-    if channels == 2:
-        return f"pan={layout}|c0=c0|c1=c1"
-    assigns = ["c0=c0", "c1=c1"]
-    assigns.extend(f"c{i}=0*c0" for i in range(2, channels))
-    return f"pan={layout}|" + "|".join(assigns)
-
-
-def _vocals_map_center(channels: int, layout: str) -> str:
-    layout = _pan_layout_name(layout, channels)
-    assigns = []
-    for i in range(channels):
-        if i == 2:
-            assigns.append("c2=0.5*c0+0.5*c1")
-        else:
-            assigns.append(f"c{i}=0*c0")
-    return f"pan={layout}|" + "|".join(assigns)
-
-
 def _encode_bitrate(channels: int, requested: str) -> str:
     if requested and requested != "320k":
         return requested
@@ -194,24 +172,50 @@ def _encode_bitrate(channels: int, requested: str) -> str:
     return requested or "320k"
 
 
-def _subtract_mapped_vocals(ffmpeg: str, original: Path, original_is_wav: bool,
-                            stream_index: int, vocals: Path, out_wav: Path,
-                            channels: int, sample_rate: int, layout: str,
-                            map_v: str) -> None:
-    orig = "0:a:0" if original_is_wav else f"0:{stream_index}"
-    graphs = [
-        f"[1:a]aresample={sample_rate}:resampler=soxr:precision=28,{map_v}[v];"
-        f"[{orig}][v]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights=1 -1[a]",
-        f"[1:a]aresample={sample_rate},{map_v}[v];"
-        f"[{orig}][v]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights=1 -1[a]",
+def _merge_graphs(orig: str, sample_rate: int, channels: int, layout: str,
+                  replace_center: bool) -> list[str]:
+    layout_name = _pan_layout_name(layout, channels)
+    soxr = f"aresample={sample_rate}:resampler=soxr:precision=28"
+    plain = f"aresample={sample_rate}"
+    if channels <= 1:
+        pan = f"pan={layout_name}|c0=0.5*c0+0.5*c1"
+        return [f"[1:a]{soxr},{pan}[a]", f"[1:a]{plain},{pan}[a]"]
+    if channels == 2 and not replace_center:
+        return [
+            f"[1:a]{soxr},aformat=channel_layouts={layout_name}[a]",
+            f"[1:a]{plain},aformat=channel_layouts={layout_name}[a]",
+        ]
+    acc_l, acc_r = channels, channels + 1
+    assigns = []
+    for i in range(channels):
+        if replace_center and i == 2:
+            assigns.append(f"c2=0.5*c{acc_l}+0.5*c{acc_r}")
+        elif not replace_center and i == 0:
+            assigns.append(f"c0=c{acc_l}")
+        elif not replace_center and i == 1:
+            assigns.append(f"c1=c{acc_r}")
+        else:
+            assigns.append(f"c{i}=c{i}")
+    pan = f"pan={layout_name}|" + "|".join(assigns)
+    return [
+        f"[1:a]{soxr}[f];[{orig}][f]amerge=inputs=2,{pan}[a]",
+        f"[1:a]{plain}[f];[{orig}][f]amerge=inputs=2,{pan}[a]",
     ]
+
+
+def _merge_accompaniment(ffmpeg: str, original: Path, original_is_wav: bool,
+                         stream_index: int, accompaniment: Path, out_wav: Path,
+                         channels: int, sample_rate: int, layout: str,
+                         replace_center: bool) -> None:
+    orig = "0:a:0" if original_is_wav else f"0:{stream_index}"
+    graphs = _merge_graphs(orig, sample_rate, channels, layout, replace_center)
     keep_layout = (not layout.endswith("c")
                    and all(c.isalnum() or c in "._" for c in layout))
     last = None
     for graph in graphs:
         cmd = [
             ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-            "-i", str(original), "-i", str(vocals),
+            "-i", str(original), "-i", str(accompaniment),
             "-filter_complex", graph, "-map", "[a]",
             "-c:a", "pcm_f32le", "-ar", str(sample_rate),
             "-ac", str(channels),
@@ -224,7 +228,7 @@ def _subtract_mapped_vocals(ffmpeg: str, original: Path, original_is_wav: bool,
             return
         except VocalRemoverError as e:
             last = e
-    raise last or VocalRemoverError("原轨减人声失败")
+    raise last or VocalRemoverError("贴回减人声声道失败")
 
 
 _PCT = re.compile(r"(\d{1,3})%")
@@ -250,12 +254,12 @@ def _has_nvidia() -> bool:
 
 def _run_demucs(wav: Path, out_dir: Path, opts: Options,
                 cb: ProgressCB, label: str, base: float, span: float) -> Path:
-    """调用 Demucs 估计人声，返回 vocals.wav 的路径。"""
+    """调用 Demucs 估计人声，返回 minus_vocals.wav（原输入 − 人声）。"""
     def build_args(segment: Optional[float], device: str):
         args = [
             sys.executable, "-m", "demucs.separate",
             "--two-stems", "vocals",
-            "--other-method", "none",
+            "--other-method", "minus",
             "--clip-mode", "none",
             "--float32",
             "-n", opts.model,
@@ -305,9 +309,9 @@ def _run_demucs(wav: Path, out_dir: Path, opts: Options,
         proc.wait()
         if cancelled:
             raise CancelledError()
-        vocals = out_dir / opts.model / wav.stem / "vocals.wav"
-        if proc.returncode == 0 and vocals.exists():
-            return vocals
+        minus = out_dir / opts.model / wav.stem / "minus_vocals.wav"
+        if proc.returncode == 0 and minus.exists():
+            return minus
         last_err = (tail or "")[-800:]
         combined = last_err.lower()
         if "out of memory" in combined and device == "cuda" and attempt == 0:
@@ -376,15 +380,15 @@ def remove_vocals(input_path, output_path=None,
                 str(wav),
             ])
             front_span = span * 0.45 if _has_center_channel(channels) else span * 0.9
-            front_vocals = _run_demucs(wav, tdp / f"sep{k}", opts, cb,
-                                       label, base, front_span)
+            front_acc = _run_demucs(wav, tdp / f"sep{k}", opts, cb,
+                                    label, base, front_span)
             if not cb("restore", base + front_span,
-                      f"{label} 原轨减人声，保留其他声道..."):
+                      f"{label} 贴回减人声前声道..."):
                 raise CancelledError()
             restored = tdp / f"restored{k}.wav"
-            _subtract_mapped_vocals(
-                ffmpeg, input_path, False, s["index"], front_vocals, restored,
-                channels, sample_rate, layout, _vocals_map_front(channels, layout),
+            _merge_accompaniment(
+                ffmpeg, input_path, False, s["index"], front_acc, restored,
+                channels, sample_rate, layout, False,
             )
             if _has_center_channel(channels):
                 center_wav = tdp / f"track{k}_center.wav"
@@ -396,15 +400,14 @@ def remove_vocals(input_path, output_path=None,
                     "-c:a", "pcm_f32le", "-ar", str(SAMPLE_RATE),
                     str(center_wav),
                 ])
-                center_vocals = _run_demucs(
+                center_acc = _run_demucs(
                     center_wav, tdp / f"sep{k}_c", opts, cb,
                     f"{label} 中置", base + front_span, span * 0.45,
                 )
                 restored2 = tdp / f"restored{k}_c.wav"
-                _subtract_mapped_vocals(
-                    ffmpeg, restored, True, 0, center_vocals, restored2,
-                    channels, sample_rate, layout,
-                    _vocals_map_center(channels, layout),
+                _merge_accompaniment(
+                    ffmpeg, restored, True, 0, center_acc, restored2,
+                    channels, sample_rate, layout, True,
                 )
                 sep_wavs.append(restored2)
             else:

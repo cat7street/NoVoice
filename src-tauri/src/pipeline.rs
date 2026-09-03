@@ -194,34 +194,6 @@ fn pan_layout_name(layout: &str, channels: i64) -> String {
     }
 }
 
-fn vocals_map_front(channels: i64, layout: &str) -> String {
-    let layout = pan_layout_name(layout, channels);
-    match channels {
-        1 => format!("pan={layout}|c0=0.5*c0+0.5*c1"),
-        2 => format!("pan={layout}|c0=c0|c1=c1"),
-        n => {
-            let mut assigns = vec!["c0=c0".to_string(), "c1=c1".to_string()];
-            for i in 2..n {
-                assigns.push(format!("c{i}=0*c0"));
-            }
-            format!("pan={layout}|{}", assigns.join("|"))
-        }
-    }
-}
-
-fn vocals_map_center(channels: i64, layout: &str) -> String {
-    let layout = pan_layout_name(layout, channels);
-    let mut assigns = Vec::new();
-    for i in 0..channels {
-        if i == 2 {
-            assigns.push("c2=0.5*c0+0.5*c1".to_string());
-        } else {
-            assigns.push(format!("c{i}=0*c0"));
-        }
-    }
-    format!("pan={layout}|{}", assigns.join("|"))
-}
-
 fn keep_layout_name(layout: &str) -> bool {
     !layout.ends_with('c')
         && layout
@@ -229,31 +201,69 @@ fn keep_layout_name(layout: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
 }
 
-fn subtract_mapped_vocals(
+fn merge_graphs(
+    orig: &str,
+    sample_rate: u32,
+    channels: i64,
+    layout: &str,
+    replace_center: bool,
+) -> Vec<String> {
+    let layout_name = pan_layout_name(layout, channels);
+    let soxr = format!("aresample={sample_rate}:resampler=soxr:precision=28");
+    let plain = format!("aresample={sample_rate}");
+    if channels <= 1 {
+        let pan = format!("pan={layout_name}|c0=0.5*c0+0.5*c1");
+        return vec![
+            format!("[1:a]{soxr},{pan}[a]"),
+            format!("[1:a]{plain},{pan}[a]"),
+        ];
+    }
+    if channels == 2 && !replace_center {
+        return vec![
+            format!("[1:a]{soxr},aformat=channel_layouts={layout_name}[a]"),
+            format!("[1:a]{plain},aformat=channel_layouts={layout_name}[a]"),
+        ];
+    }
+    // 原轨 N 声道 + 伴奏立体声 → 只替换 FL/FR 或 FC，其余声道原样留下
+    let acc_l = channels;
+    let acc_r = channels + 1;
+    let mut assigns = Vec::new();
+    for i in 0..channels {
+        if replace_center && i == 2 {
+            assigns.push(format!("c2=0.5*c{acc_l}+0.5*c{acc_r}"));
+        } else if !replace_center && i == 0 {
+            assigns.push(format!("c0=c{acc_l}"));
+        } else if !replace_center && i == 1 {
+            assigns.push(format!("c1=c{acc_r}"));
+        } else {
+            assigns.push(format!("c{i}=c{i}"));
+        }
+    }
+    let pan = format!("pan={layout_name}|{}", assigns.join("|"));
+    vec![
+        format!("[1:a]{soxr}[f];[{orig}][f]amerge=inputs=2,{pan}[a]"),
+        format!("[1:a]{plain}[f];[{orig}][f]amerge=inputs=2,{pan}[a]"),
+    ]
+}
+
+fn merge_accompaniment(
     ffmpeg: &Path,
     original: &Path,
     original_is_wav: bool,
     stream_index: i64,
-    vocals: &Path,
+    accompaniment: &Path,
     out_wav: &Path,
     channels: i64,
     sample_rate: u32,
     layout: &str,
-    map_v: &str,
+    replace_center: bool,
 ) -> Result<(), PipelineError> {
-    let orig_label = if original_is_wav {
+    let orig = if original_is_wav {
         "0:a:0".to_string()
     } else {
         format!("0:{stream_index}")
     };
-    let graphs = [
-        format!(
-            "[1:a]aresample={sample_rate}:resampler=soxr:precision=28,{map_v}[v];[{orig_label}][v]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights=1 -1[a]"
-        ),
-        format!(
-            "[1:a]aresample={sample_rate},{map_v}[v];[{orig_label}][v]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights=1 -1[a]"
-        ),
-    ];
+    let graphs = merge_graphs(&orig, sample_rate, channels, layout, replace_center);
     let mut last_err = None;
     let keep_layout = keep_layout_name(layout);
     for graph in &graphs {
@@ -261,7 +271,7 @@ fn subtract_mapped_vocals(
         cmd.args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
             .arg(original)
             .arg("-i")
-            .arg(vocals)
+            .arg(accompaniment)
             .args([
                 "-filter_complex",
                 graph,
@@ -282,7 +292,7 @@ fn subtract_mapped_vocals(
             Err(e) => last_err = Some(e),
         }
     }
-    Err(last_err.unwrap_or_else(|| PipelineError::Message("原轨减人声失败".into())))
+    Err(last_err.unwrap_or_else(|| PipelineError::Message("贴回减人声声道失败".into())))
 }
 
 fn encode_bitrate(channels: i64, requested: &str) -> String {
@@ -400,7 +410,7 @@ fn run_demucs(
             "--two-stems".into(),
             "vocals".into(),
             "--other-method".into(),
-            "none".into(),
+            "minus".into(),
             "--clip-mode".into(),
             "none".into(),
             "--float32".into(),
@@ -478,12 +488,12 @@ fn run_demucs(
         if cancelled || cancel.load(Ordering::SeqCst) {
             return Err(PipelineError::Cancelled);
         }
-        let vocals = out_dir
+        let minus = out_dir
             .join(&opts.model)
             .join(wav.file_stem().unwrap_or_default())
-            .join("vocals.wav");
-        if status.success() && vocals.exists() {
-            return Ok(vocals);
+            .join("minus_vocals.wav");
+        if status.success() && minus.exists() {
+            return Ok(minus);
         }
         last_err = tail.chars().rev().take(800).collect::<String>().chars().rev().collect();
         let combined = last_err.to_ascii_lowercase();
@@ -640,7 +650,7 @@ pub fn remove_vocals(
             } else {
                 span * 0.9
             };
-            let front_vocals = run_demucs(
+            let front_acc = run_demucs(
                 &python,
                 &wav,
                 &sep_dir,
@@ -655,23 +665,23 @@ pub fn remove_vocals(
             if !progress(ProgressEvent {
                 stage: "restore".into(),
                 progress: base + front_span,
-                message: format!("{label} 原轨减人声，保留其他声道..."),
+                message: format!("{label} 贴回减人声前声道..."),
                 file: Some(input_path.display().to_string()),
             }) {
                 return Err(PipelineError::Cancelled);
             }
             let restored = td.join(format!("restored{k}.wav"));
-            subtract_mapped_vocals(
+            merge_accompaniment(
                 &ffmpeg,
                 &input_path,
                 false,
                 idx,
-                &front_vocals,
+                &front_acc,
                 &restored,
                 channels,
                 sample_rate,
                 &layout,
-                &vocals_map_front(channels, &layout),
+                false,
             )?;
             if has_center_channel(channels) {
                 let center_wav = td.join(format!("track{k}_center.wav"));
@@ -694,7 +704,7 @@ pub fn remove_vocals(
                 )?;
                 let center_dir = td.join(format!("sep{k}_c"));
                 fs::create_dir_all(&center_dir)?;
-                let center_vocals = run_demucs(
+                let center_acc = run_demucs(
                     &python,
                     &center_wav,
                     &center_dir,
@@ -707,17 +717,17 @@ pub fn remove_vocals(
                     &mut progress,
                 )?;
                 let restored2 = td.join(format!("restored{k}_c.wav"));
-                subtract_mapped_vocals(
+                merge_accompaniment(
                     &ffmpeg,
                     &restored,
                     true,
                     0,
-                    &center_vocals,
+                    &center_acc,
                     &restored2,
                     channels,
                     sample_rate,
                     &layout,
-                    &vocals_map_center(channels, &layout),
+                    true,
                 )?;
                 sep_wavs.push(restored2);
             } else {
