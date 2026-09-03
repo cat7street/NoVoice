@@ -410,7 +410,7 @@ fn run_demucs(
             "--two-stems".into(),
             "vocals".into(),
             "--other-method".into(),
-            "minus".into(),
+            "none".into(),
             "--clip-mode".into(),
             "none".into(),
             "--float32".into(),
@@ -488,12 +488,12 @@ fn run_demucs(
         if cancelled || cancel.load(Ordering::SeqCst) {
             return Err(PipelineError::Cancelled);
         }
-        let minus = out_dir
+        let vocals = out_dir
             .join(&opts.model)
             .join(wav.file_stem().unwrap_or_default())
-            .join("minus_vocals.wav");
-        if status.success() && minus.exists() {
-            return Ok(minus);
+            .join("vocals.wav");
+        if status.success() && vocals.exists() {
+            return Ok(vocals);
         }
         last_err = tail.chars().rev().take(800).collect::<String>().chars().rev().collect();
         let combined = last_err.to_ascii_lowercase();
@@ -509,6 +509,150 @@ fn run_demucs(
         break;
     }
     Err(PipelineError::Message(format!("AI 人声分离失败:\n{last_err}")))
+}
+
+fn union_vocals_then_subtract(
+    ffmpeg: &Path,
+    original: &Path,
+    voc_a: &Path,
+    voc_b: &Path,
+    out_wav: &Path,
+) -> Result<PathBuf, PipelineError> {
+    // 两路人声按样本取绝对值更大者，再从原轨反相减掉。
+    let graph = concat!(
+        "[1:a][2:a]join=inputs=2:channel_layout=quad,aeval=exprs=",
+        r"if(gte(abs(val(0)),abs(val(2))),val(0),val(2))",
+        r"|if(gte(abs(val(1)),abs(val(3))),val(1),val(3)):c=stereo,volume=-1[v];",
+        "[0:a][v]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights=1|1[a]",
+    );
+    match run_checked(
+        Command::new(ffmpeg)
+            .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(original)
+            .arg("-i")
+            .arg(voc_a)
+            .arg("-i")
+            .arg(voc_b)
+            .args([
+                "-filter_complex",
+                graph,
+                "-map",
+                "[a]",
+                "-c:a",
+                "pcm_f32le",
+            ])
+            .arg(out_wav),
+    ) {
+        Ok(()) => Ok(out_wav.to_path_buf()),
+        Err(_) => {
+            // 叠加失败时退回高质量人声，用反相减。
+            let fallback = concat!(
+                "[1:a]aformat=sample_fmts=fltp,volume=-1[v];",
+                "[0:a][v]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights=1|1[a]",
+            );
+            run_checked(
+                Command::new(ffmpeg)
+                    .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+                    .arg(original)
+                    .arg("-i")
+                    .arg(voc_a)
+                    .args([
+                        "-filter_complex",
+                        fallback,
+                        "-map",
+                        "[a]",
+                        "-c:a",
+                        "pcm_f32le",
+                    ])
+                    .arg(out_wav),
+            )?;
+            Ok(out_wav.to_path_buf())
+        }
+    }
+}
+
+fn subtract_vocals_from_original(
+    ffmpeg: &Path,
+    original: &Path,
+    vocals: &Path,
+    out_wav: &Path,
+) -> Result<PathBuf, PipelineError> {
+    let graph = concat!(
+        "[1:a]aformat=sample_fmts=fltp,volume=-1[v];",
+        "[0:a][v]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights=1|1[a]",
+    );
+    run_checked(
+        Command::new(ffmpeg)
+            .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(original)
+            .arg("-i")
+            .arg(vocals)
+            .args([
+                "-filter_complex",
+                graph,
+                "-map",
+                "[a]",
+                "-c:a",
+                "pcm_f32le",
+            ])
+            .arg(out_wav),
+    )?;
+    Ok(out_wav.to_path_buf())
+}
+
+fn run_demucs_for_track(
+    python: &Path,
+    wav: &Path,
+    out_dir: &Path,
+    opts: &ProcessOptions,
+    model_repo: &Path,
+    label: &str,
+    base: f64,
+    span: f64,
+    cancel: &AtomicBool,
+    progress: &mut ProgressCb,
+    ffmpeg: &Path,
+) -> Result<PathBuf, PipelineError> {
+    if opts.model != "htdemucs_ft" {
+        let vocals = run_demucs(
+            python, wav, out_dir, opts, model_repo, label, base, span, cancel, progress,
+        )?;
+        let minus = out_dir.join("minus_vocals.wav");
+        return subtract_vocals_from_original(ffmpeg, wav, &vocals, &minus);
+    }
+    // 游戏短喊：htdemucs 比 htdemucs_ft 抠得更干净。高质量仍跑 FT，但输出以标准模型为准，
+    // 只在标准漏掉、FT 更狠的样本上才用 FT（按样本取去人声更多的那路）。
+    let std_span = span * 0.42;
+    let ft_span = span - std_span;
+    let mut std_opts = opts.clone();
+    std_opts.model = "htdemucs".into();
+    let std_dir = out_dir.join("std");
+    fs::create_dir_all(&std_dir)?;
+    let voc_std = run_demucs(
+        python,
+        wav,
+        &std_dir,
+        &std_opts,
+        model_repo,
+        &format!("{label} 标准"),
+        base,
+        std_span,
+        cancel,
+        progress,
+    )?;
+    if !progress(ProgressEvent {
+        stage: "union".into(),
+        progress: base + std_span,
+        message: format!("{label} 高质量补漏..."),
+        file: Some(wav.display().to_string()),
+    }) {
+        return Err(PipelineError::Cancelled);
+    }
+    let voc_ft = run_demucs(
+        python, wav, out_dir, opts, model_repo, label, base + std_span, ft_span * 0.95, cancel, progress,
+    )?;
+    let union = out_dir.join("union_minus.wav");
+    union_vocals_then_subtract(ffmpeg, wav, &voc_std, &voc_ft, &union)
 }
 
 pub fn remove_vocals(
@@ -650,7 +794,7 @@ pub fn remove_vocals(
             } else {
                 span * 0.9
             };
-            let front_acc = run_demucs(
+            let front_acc = run_demucs_for_track(
                 &python,
                 &wav,
                 &sep_dir,
@@ -661,6 +805,7 @@ pub fn remove_vocals(
                 front_span,
                 &cancel,
                 &mut progress,
+                &ffmpeg,
             )?;
             if !progress(ProgressEvent {
                 stage: "restore".into(),
@@ -704,7 +849,7 @@ pub fn remove_vocals(
                 )?;
                 let center_dir = td.join(format!("sep{k}_c"));
                 fs::create_dir_all(&center_dir)?;
-                let center_acc = run_demucs(
+                let center_acc = run_demucs_for_track(
                     &python,
                     &center_wav,
                     &center_dir,
@@ -715,6 +860,7 @@ pub fn remove_vocals(
                     span * 0.45,
                     &cancel,
                     &mut progress,
+                    &ffmpeg,
                 )?;
                 let restored2 = td.join(format!("restored{k}_c.wav"));
                 merge_accompaniment(

@@ -254,12 +254,12 @@ def _has_nvidia() -> bool:
 
 def _run_demucs(wav: Path, out_dir: Path, opts: Options,
                 cb: ProgressCB, label: str, base: float, span: float) -> Path:
-    """调用 Demucs 估计人声，返回 minus_vocals.wav（原输入 − 人声）。"""
+    """调用 Demucs 估计人声，返回 vocals.wav。"""
     def build_args(segment: Optional[float], device: str):
         args = [
             sys.executable, "-m", "demucs.separate",
             "--two-stems", "vocals",
-            "--other-method", "minus",
+            "--other-method", "none",
             "--clip-mode", "none",
             "--float32",
             "-n", opts.model,
@@ -309,9 +309,9 @@ def _run_demucs(wav: Path, out_dir: Path, opts: Options,
         proc.wait()
         if cancelled:
             raise CancelledError()
-        minus = out_dir / opts.model / wav.stem / "minus_vocals.wav"
-        if proc.returncode == 0 and minus.exists():
-            return minus
+        vocals = out_dir / opts.model / wav.stem / "vocals.wav"
+        if proc.returncode == 0 and vocals.exists():
+            return vocals
         last_err = (tail or "")[-800:]
         combined = last_err.lower()
         if "out of memory" in combined and device == "cuda" and attempt == 0:
@@ -323,6 +323,66 @@ def _run_demucs(wav: Path, out_dir: Path, opts: Options,
             continue
         break
     raise VocalRemoverError(f"AI 人声分离失败:\n{last_err}")
+
+
+def _subtract_vocals(ffmpeg: str, original: Path, vocals: Path, out_wav: Path) -> Path:
+    graph = (
+        "[1:a]aformat=sample_fmts=fltp,volume=-1[v];"
+        "[0:a][v]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights=1|1[a]"
+    )
+    _run([
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(original), "-i", str(vocals),
+        "-filter_complex", graph, "-map", "[a]",
+        "-c:a", "pcm_f32le", str(out_wav),
+    ])
+    return out_wav
+
+
+def _union_vocals_then_subtract(ffmpeg: str, original: Path, voc_a: Path,
+                                voc_b: Path, out_wav: Path) -> Path:
+    graph = (
+        "[1:a][2:a]join=inputs=2:channel_layout=quad,"
+        r"aeval=exprs=if(gte(abs(val(0)),abs(val(2))),val(0),val(2))"
+        r"|if(gte(abs(val(1)),abs(val(3))),val(1),val(3)):c=stereo,volume=-1[v];"
+        "[0:a][v]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights=1|1[a]"
+    )
+    try:
+        _run([
+            ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(original), "-i", str(voc_a), "-i", str(voc_b),
+            "-filter_complex", graph, "-map", "[a]",
+            "-c:a", "pcm_f32le", str(out_wav),
+        ])
+        return out_wav
+    except VocalRemoverError:
+        return _subtract_vocals(ffmpeg, original, voc_a, out_wav)
+
+
+def _run_demucs_for_track(wav: Path, out_dir: Path, opts: Options,
+                          cb: ProgressCB, label: str, base: float, span: float,
+                          ffmpeg: str) -> Path:
+    if opts.model != "htdemucs_ft":
+        vocals = _run_demucs(wav, out_dir, opts, cb, label, base, span)
+        return _subtract_vocals(ffmpeg, wav, vocals, out_dir / "minus_vocals.wav")
+    std_span = span * 0.42
+    ft_span = span - std_span
+    std_opts = Options(
+        model="htdemucs",
+        bitrate=opts.bitrate,
+        device=opts.device,
+        tracks=opts.tracks,
+    )
+    voc_std = _run_demucs(
+        wav, out_dir / "std", std_opts, cb,
+        f"{label} 标准", base, std_span,
+    )
+    if not cb("union", base + std_span, f"{label} 高质量补漏..."):
+        raise CancelledError()
+    voc_ft = _run_demucs(wav, out_dir, opts, cb, label, base + std_span, ft_span * 0.95)
+    return _union_vocals_then_subtract(
+        ffmpeg, wav, voc_std, voc_ft, out_dir / "union_minus.wav",
+    )
 
 
 def remove_vocals(input_path, output_path=None,
@@ -380,8 +440,9 @@ def remove_vocals(input_path, output_path=None,
                 str(wav),
             ])
             front_span = span * 0.45 if _has_center_channel(channels) else span * 0.9
-            front_acc = _run_demucs(wav, tdp / f"sep{k}", opts, cb,
-                                    label, base, front_span)
+            front_acc = _run_demucs_for_track(
+                wav, tdp / f"sep{k}", opts, cb, label, base, front_span, ffmpeg,
+            )
             if not cb("restore", base + front_span,
                       f"{label} 贴回减人声前声道..."):
                 raise CancelledError()
@@ -400,9 +461,9 @@ def remove_vocals(input_path, output_path=None,
                     "-c:a", "pcm_f32le", "-ar", str(SAMPLE_RATE),
                     str(center_wav),
                 ])
-                center_acc = _run_demucs(
+                center_acc = _run_demucs_for_track(
                     center_wav, tdp / f"sep{k}_c", opts, cb,
-                    f"{label} 中置", base + front_span, span * 0.45,
+                    f"{label} 中置", base + front_span, span * 0.45, ffmpeg,
                 )
                 restored2 = tdp / f"restored{k}_c.wav"
                 _merge_accompaniment(

@@ -325,7 +325,7 @@ export default function App() {
                 </button>
               ))}
             </div>
-            <span className="hint">原轨减人声；枪声、脚步、环绕不重建</span>
+            <span className="hint">原轨减人声。高质量会叠标准模型，补游戏短喊</span>
           </div>
 
           <div className="field">

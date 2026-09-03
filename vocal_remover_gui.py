@@ -158,7 +158,7 @@ def hook_dropfiles(widget: tk.Misc, callback) -> object | None:
 
 MODEL_MAP = {
     "标准（速度快）": "htdemucs",
-    "高质量（更慢，人声估计更准）": "htdemucs_ft",
+    "高质量（更慢，叠加标准补短喊）": "htdemucs_ft",
 }
 TRACK_MAP = {
     "全部音轨都去人声": "all",
